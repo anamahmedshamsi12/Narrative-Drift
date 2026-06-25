@@ -1,0 +1,7 @@
+pandas
+numpy
+sentence-transformers
+scikit-learn
+networkx
+plotly
+streamlit
