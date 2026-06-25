@@ -9,10 +9,8 @@
     "start": "electron .",
     "build": "electron-builder"
   },
-  "dependencies": {
-    "electron": "latest"
-  },
   "devDependencies": {
+    "electron": "latest",
     "electron-builder": "latest"
   },
   "build": {
