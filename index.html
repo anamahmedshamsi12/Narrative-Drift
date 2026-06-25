@@ -89,7 +89,8 @@ input{font-family:inherit;}
   overflow:hidden; transition:width .2s ease, flex-basis .2s ease; z-index:200;
   -webkit-app-region:no-drag; /* never part of the Electron titlebar drag region */
 }
-#sidebar:hover{flex:0 0 220px; width:220px;}
+#sidebar:hover, #sidebar.pinned{flex:0 0 220px; width:220px;}
+#sidebar.pinned .sidebar-logo .label, #sidebar.pinned .sidebar-item .lbl{opacity:1;}
 .sidebar-logo{height:52px; flex:0 0 52px; display:flex; align-items:center; gap:10px; padding:0 12px; border-bottom:1px solid var(--bd1);}
 .sidebar-logo .mark{width:26px; height:26px; border-radius:6px; background:var(--teal-bg); border:1px solid var(--teal-bd); display:flex; align-items:center; justify-content:center; color:var(--teal); font-size:14px; flex:0 0 auto;}
 .sidebar-logo .label{font-weight:600; font-size:13px; white-space:nowrap; opacity:0; transition:opacity .15s ease;}
@@ -172,6 +173,36 @@ input{font-family:inherit;}
 .settings-save-note{font-size:11px; color:var(--teal); margin-top:6px; opacity:0; transition:opacity .2s ease;}
 .settings-save-note.show{opacity:1;}
 
+/* ===== DRUG INFO TOOLTIP =====
+   Every drug name in the app is wrapped in a `.drug-ref` span (see
+   drugSpan()/wrapDrugNames() in the script). This single overlay
+   card is reused for all of them rather than building one tooltip
+   per span. */
+.drug-ref{ border-bottom:1px dotted var(--tx3); cursor:help; }
+.drug-tooltip-card{
+  position:fixed; z-index:9500; width:320px; max-width:320px;
+  background:#0E1525; border:1px solid rgba(0,212,170,0.3); border-radius:10px;
+  box-shadow:0 8px 32px rgba(0,0,0,0.4); opacity:0; pointer-events:none;
+  transition:opacity .12s ease; font-family:'Space Grotesk',sans-serif; overflow:hidden;
+}
+.drug-tooltip-card.show{opacity:1; pointer-events:auto;}
+.dt-body{padding:14px;}
+.dt-header{display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px;}
+.dt-title{font-size:14px; font-weight:600; color:var(--tx1);}
+.dt-schedule{font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:700; padding:3px 8px; border-radius:4px; white-space:nowrap; flex:0 0 auto;}
+.dt-schedule.red{background:var(--red-bg); color:var(--red);}
+.dt-schedule.amber{background:var(--amber-bg); color:var(--amber);}
+.dt-divider{height:1px; background:var(--bd1); margin:10px 0;}
+.dt-row{display:flex; justify-content:space-between; gap:10px; font-size:11.5px; margin-bottom:5px;}
+.dt-label{color:var(--tx3); letter-spacing:.04em; font-weight:600; flex:0 0 auto;}
+.dt-value{font-family:'JetBrains Mono',monospace; color:var(--tx1); text-align:right;}
+.dt-boxed{border-left:3px solid var(--red); padding-left:10px;}
+.dt-boxed-title{color:var(--red); font-size:11px; font-weight:700; margin-bottom:4px;}
+.dt-boxed-text{color:var(--red); font-size:11.5px; line-height:1.5; opacity:.9;}
+.dt-section-title{font-size:10.5px; letter-spacing:.05em; color:var(--tx3); font-weight:600; margin-bottom:5px;}
+.dt-text{font-size:11.5px; color:var(--tx2); line-height:1.5;}
+.dt-empty{color:var(--tx3); font-size:12px; padding:6px 0;}
+
 @media print{
   #sidebar, .topbar, .ekg-strip, .cmdbar, .view-header .view-actions{ display:none !important; }
   body, #app, .tech-content, .view-area{ overflow:visible !important; height:auto !important; background:#fff !important; color:#000 !important; }
@@ -182,7 +213,9 @@ input{font-family:inherit;}
 /* ===== TECH MODE ===== */
 #tech-mode{display:flex; flex-direction:row; height:100vh; opacity:1; transition:opacity .3s ease, transform .3s ease;}
 
-.topbar{height:52px; flex:0 0 52px; display:flex; align-items:center; gap:20px; padding:0 16px; background:var(--s1); border-bottom:1px solid var(--bd1);}
+.topbar{height:52px; flex:0 0 52px; display:flex; align-items:center; gap:20px; padding:0 16px; background:var(--s1); border-bottom:1px solid var(--bd1); -webkit-app-region:drag;}
+.topbar button, .topbar input, .topbar .win-controls{ -webkit-app-region:no-drag; } /* every interactive child opts back out of the drag region, or clicks would just move the window instead of firing */
+body.is-electron-mac .topbar{ padding-left:84px; } /* leaves room for macOS's native inset traffic lights, see main.js trafficLightPosition */
 .brand{display:flex; align-items:center; gap:8px;}
 .brand-icon{width:26px; height:26px; border-radius:6px; background:var(--teal-bg); border:1px solid var(--teal-bd); display:flex; align-items:center; justify-content:center; color:var(--teal); font-size:14px;}
 .brand-text{display:flex; flex-direction:column; line-height:1.1;}
@@ -216,8 +249,8 @@ input{font-family:inherit;}
 .mode-switch-btn:hover{background:var(--teal-bg);}
 
 /* EKG */
-.ekg-strip{height:32px; flex:0 0 32px; background:var(--s1); border-bottom:1px solid var(--bd1); position:relative;}
-#ekg-canvas{width:100%; height:100%; display:block;}
+.ekg-strip{height:32px; flex:0 0 32px; background:var(--s1); border-bottom:1px solid var(--bd1); position:relative; display:flex; align-items:center; justify-content:center;}
+#ekg-canvas{width:200px; height:22px; display:block;}
 
 /* main workspace */
 .workspace{flex:1; display:grid; grid-template-columns:280px 1fr 280px; overflow:hidden; min-height:0;}
@@ -461,6 +494,17 @@ input{font-family:inherit;}
 
       <button class="mode-switch-btn" id="btn-key" title="Set Anthropic API key">🔑 API Key</button>
       <button class="mode-switch-btn" id="btn-to-patient">Switch to Patient Mode →</button>
+
+      <!-- Custom window controls — only shown on Windows/Linux under
+           Electron, where there's no native titlebar to draw real
+           traffic lights (macOS gets those for free via
+           titleBarStyle:'hiddenInset' in main.js). Hidden by default;
+           unhidden by JS once window.remiAPI confirms platform !== 'darwin'. -->
+      <div class="win-controls hidden" id="win-controls" style="display:flex; gap:2px; margin-left:8px;">
+        <button class="mode-switch-btn" id="win-minimize" title="Minimize">─</button>
+        <button class="mode-switch-btn" id="win-maximize" title="Maximize">▢</button>
+        <button class="mode-switch-btn" id="win-close" title="Close" style="color:var(--red);">✕</button>
+      </div>
     </div>
 
     <div class="ekg-strip"><canvas id="ekg-canvas"></canvas></div>
@@ -764,7 +808,10 @@ function shortTime(mins){
 }
 
 /** Writes the current shift time into the topbar clock display. */
-function updateClock(){ $('clock-display').textContent = minutesToTimeStr(state.shiftMinutes).replace(' ',''); }
+function updateClock(){
+  $('clock-display').textContent = minutesToTimeStr(state.shiftMinutes).replace(' ','');
+  updateWindowTitle();
+}
 
 /* ============================================================
    SIM LOOP
@@ -881,17 +928,27 @@ function advanceMinute(){
       handleEvent(ev);
     }
   });
-  if(state.shiftMinutes >= 135 && !state.fired.has('shift-end')){
-    state.fired.add('shift-end');
-    generateHandoffReport();
-    state.running = false;
-    if(tickHandle) clearTimeout(tickHandle);
-    $('btn-pause').classList.add('hidden');
-    $('btn-start').classList.add('hidden');
-    $('status-dot').classList.remove('live');
-    $('status-text').textContent = 'Shift complete';
-  }
+  if(state.shiftMinutes >= 135 && !state.fired.has('shift-end')) endShiftNow();
   renderStateBoard();
+}
+
+/**
+ * Ends the shift: generates the handoff report and stops the clock.
+ * Shared by the natural end-of-shift check above (minute 135) and
+ * the Electron "End Shift" menu action (File > End Shift), so a tech
+ * manually ending a shift early gets exactly the same handoff report
+ * and UI state as one that runs to completion.
+ */
+function endShiftNow(){
+  if(state.fired.has('shift-end')) return; // already ended — avoid a duplicate handoff report from a stray menu click
+  state.fired.add('shift-end');
+  generateHandoffReport();
+  state.running = false;
+  if(tickHandle) clearTimeout(tickHandle);
+  $('btn-pause').classList.add('hidden');
+  $('btn-start').classList.add('hidden');
+  $('status-dot').classList.remove('live');
+  $('status-text').textContent = 'Shift complete';
 }
 
 /* ============================================================
@@ -940,7 +997,7 @@ function pushFeedCard(type, drugKey, detail){
   }[type];
   card.innerHTML = `
     <span class="feed-badge t-${type}">${badgeText}</span>
-    <div class="feed-drug">${drugNames[drugKey]}</div>
+    <div class="feed-drug">${drugSpan(drugKey)}</div>
     <div class="feed-detail">${detail}</div>
     <div class="feed-time mono">${shortTime(state.shiftMinutes)}</div>
   `;
@@ -1723,7 +1780,7 @@ function renderStateBoard(){
       const diff = key==='oxy' ? state.oxyDiscrepancies.reduce((a,d)=>a+d.gap,0) : 0;
       statusHtml = `<span class="cs-status flag">⚠ ${diff} </span>`;
     } else statusHtml = `<span class="cs-status due">⏳ count due</span>`;
-    row.innerHTML = `<span class="cs-name">${drugNames[key]}</span><span class="cs-count">${state.cs[key]}</span>${statusHtml}`;
+    row.innerHTML = `<span class="cs-name">${drugSpan(key)}</span><span class="cs-count">${state.cs[key]}</span>${statusHtml}`;
     csList.appendChild(row);
   });
 
@@ -1743,7 +1800,7 @@ function renderStateBoard(){
     const row = document.createElement('div');
     row.className = 'inv-row' + (level==='low'?' low':level==='warn'?' warn':'');
     row.innerHTML = `
-      <div class="inv-top"><span class="nm">${drugNames[key]}</span><span class="ct mono">${count}</span></div>
+      <div class="inv-top"><span class="nm">${drugSpan(key)}</span><span class="ct mono">${count}</span></div>
       <div class="inv-bar-track"><div class="inv-bar-fill ${level==='good'?'':level}" style="width:${pct}%"></div></div>
     `;
     invList.appendChild(row);
@@ -1757,7 +1814,7 @@ function renderStateBoard(){
     row.className = 'fu-row' + (fu.overdue?' overdue':'');
     row.innerHTML = `
       <div class="fu-top"><span class="fu-dot"></span>${escapeHtml(fu.name)}</div>
-      <div class="fu-reason">${escapeHtml(fu.reason)}</div>
+      <div class="fu-reason">${wrapDrugNames(escapeHtml(fu.reason))}</div>
       <div class="fu-time mono">${elapsed} min elapsed</div>
     `;
     fuList.appendChild(row);
@@ -1814,6 +1871,18 @@ function ekgWave(x){
  * started once at load time, not re-invoked per event (pulseEkg()
  * only changes `ekgAmp`, which this loop reads on its next frame).
  */
+let ekgActive = false;     // true only while a recent event is animating the strip
+let ekgActiveUntil = 0;    // performance.now() timestamp the current animation burst should end by
+
+/**
+ * Draws one frame. At rest this draws a flat, motionless line — the
+ * strip used to scroll continuously even with no shift running, which
+ * read as constant background motion rather than a meaningful signal.
+ * Now it only animates for a brief window right after pulseEkg() (a
+ * real heartbeat monitor doesn't move when there's nothing to show),
+ * and the render loop itself stops (no further requestAnimationFrame)
+ * once that window ends, rather than running forever in the background.
+ */
 function drawEkg(){
   const w = ekgCanvas.width, h = ekgCanvas.height;
   ekgCtx.clearRect(0,0,w,h);
@@ -1825,22 +1894,34 @@ function drawEkg(){
   const mid = h/2;
   const scaleY = (h/2 - 4*devicePixelRatio) * ekgAmp;
   for(let px=0; px<w; px++){
-    const v = ekgWave(px*devicePixelRatio*0.6 + ekgX);
+    const v = ekgActive ? ekgWave(px*devicePixelRatio*0.6 + ekgX) : 0;
     const y = mid - v*scaleY;
     if(px===0) ekgCtx.moveTo(px,y); else ekgCtx.lineTo(px,y);
   }
   ekgCtx.stroke();
+
+  if(!ekgActive) return; // still — no more frames scheduled until the next pulseEkg()
+
   ekgX += 2.2;
-  // Amplitude eases back down to baseline (1) after a pulse rather than
-  // snapping instantly, so a burst of events reads as one elevated
-  // heartbeat rather than a series of jarring jumps.
   if(ekgAmp > 1){ ekgAmp -= 0.01; if(ekgAmp<1) ekgAmp=1; }
+  if(performance.now() > ekgActiveUntil){ ekgActive = false; drawEkg(); return; } // one final still frame, then stop
   requestAnimationFrame(drawEkg);
 }
-drawEkg();
+drawEkg(); // initial still frame
 
-/** Spikes the EKG amplitude — called from handleEvent() on every shift event so the strip visibly reacts regardless of whether that event goes on to trigger an agent turn. */
-function pulseEkg(){ ekgAmp = 1.6; }
+/**
+ * Triggers a brief animated heartbeat on the EKG strip — called from
+ * handleEvent() on every shift event so the strip visibly reacts
+ * regardless of whether that event goes on to trigger an agent turn.
+ * Restarts the render loop only if it isn't already running, so
+ * back-to-back events extend the animation window instead of
+ * stacking duplicate rAF loops.
+ */
+function pulseEkg(){
+  ekgAmp = 1.6;
+  ekgActiveUntil = performance.now() + 1400;
+  if(!ekgActive){ ekgActive = true; requestAnimationFrame(drawEkg); }
+}
 
 /* ============================================================
    TOP BAR CONTROLS
@@ -2178,7 +2259,7 @@ function renderPatientStep(step, opts={}){
         <div class="patient-card">
           <div class="p-check">✓</div>
           <span class="p-status-pill">Ready for pickup</span>
-          <div class="p-drugname">${drug.label}</div>
+          <div class="p-drugname">${drugSpan(drug.label)}</div>
           <div class="p-confirm-card">
             <div class="p-confirm-row"><span class="lbl">Patient</span><span class="val">${escapeHtml(patientData.lastName)}</span></div>
             <div class="p-confirm-row"><span class="lbl">Prescriber</span><span class="val">${drug.prescriber}</span></div>
@@ -2243,7 +2324,7 @@ function renderPatientStep(step, opts={}){
     html = `
       <div class="${dirClass}">
         <div class="patient-card">
-          <div class="p-title">Would you like to speak with our pharmacist about ${drug.label} today?</div>
+          <div class="p-title">Would you like to speak with our pharmacist about ${drugSpan(drug.label)} today?</div>
           <div class="p-sub">They can answer questions about how to take it, what to expect, and any interactions.</div>
           <button class="p-btn p-btn-primary" id="p-counsel-yes">Yes please</button>
           <button class="p-btn p-btn-secondary" id="p-counsel-no">No thanks, I'm good</button>
@@ -2313,6 +2394,12 @@ function renderPatientStep(step, opts={}){
  * @param {{key:string,label:string,...}} drug - The pickup-pool drug entry the patient is collecting (see `pickupDrugPool`).
  */
 function checkCrossModeAndProceed(drug){
+  // Cross-mode link to the Interactions view: whatever the patient is
+  // picking up gets seeded into the interaction-checker chip list, so
+  // a tech who flips to Interactions after this pickup isn't starting
+  // from a blank checker — see seedInteractionCheck()'s doc comment.
+  seedInteractionCheck(drug.label);
+
   if(drug.key === 'oxy' && (state.csFlags.oxy === 'flag' || state.diversionDetected)){
     renderPatientStep('team-member-needed');
     flashCrossModeAlert('⚠ Patient at counter for flagged CS drug — tech required');
@@ -2462,7 +2549,7 @@ function renderDispensingView(){
   tbody.innerHTML = rows.length ? rows.map(r => `
     <tr class="${r.flagged ? 'flagged' : ''}">
       <td class="mono-cell">${r.time}</td>
-      <td>${escapeHtml(drugNames[r.drug])}${r.kind==='count' ? ' <span class="pill warn">COUNT</span>' : ''}</td>
+      <td>${drugSpan(r.drug)}${r.kind==='count' ? ' <span class="pill warn">COUNT</span>' : ''}</td>
       <td class="mono-cell">${r.qty !== null ? r.qty : '—'}</td>
       <td>${escapeHtml(r.pt)}</td>
       <td>Tech</td>
@@ -2540,7 +2627,7 @@ function renderInventoryView(){
     const updated = state.lastUpdated[key] != null ? shortTime(state.lastUpdated[key]) : '—';
     return `
       <tr class="${status === 'low' ? 'flagged' : ''}">
-        <td>${escapeHtml(drugNames[key])}${isCS ? ' <span class="pill warn" style="background:var(--s3);color:var(--tx2);">CS</span>' : ''}</td>
+        <td>${drugSpan(key)}${isCS ? ' <span class="pill warn" style="background:var(--s3);color:var(--tx2);">CS</span>' : ''}</td>
         <td><input type="number" class="inv-edit" data-drug="${key}" data-cs="${isCS}" value="${stock}" min="0"></td>
         <td class="mono-cell">${par}</td>
         <td class="mono-cell">${max}</td>
@@ -2569,7 +2656,7 @@ function renderInventoryView(){
   const reorderEl = $('reorder-list');
   reorderEl.innerHTML = reorder.length ? reorder.map(key => `
     <div class="fu-row${stockStatus(key in state.cs ? state.cs[key] : state.inv[key], PAR_LEVELS[key])==='low'?' overdue':''}">
-      <div class="fu-top"><span class="fu-dot"></span>${escapeHtml(drugNames[key])}</div>
+      <div class="fu-top"><span class="fu-dot"></span>${drugSpan(key)}</div>
       <div class="fu-reason">On hand: ${key in state.cs ? state.cs[key] : state.inv[key]} · Par: ${PAR_LEVELS[key]}${key==='ozm' ? ' · FDA shortage — expect extended lead time' : ''}</div>
     </div>
   `).join('') : `<div style="color:var(--tx3); font-size:12px;">Nothing below par right now.</div>`;
@@ -2615,7 +2702,7 @@ function renderFollowupsView(){
           <div><b>${escapeHtml(fu.name)}</b> <span style="color:var(--tx3); font-size:11px;">· ${elapsed} min elapsed</span></div>
           <span class="pill ${status==='completed'?'good':status==='escalated'?'low':'warn'}">${status}</span>
         </div>
-        <div class="fu-reason">${escapeHtml(fu.reason)}</div>
+        <div class="fu-reason">${wrapDrugNames(escapeHtml(fu.reason))}</div>
         ${status !== 'completed' ? `
         <div class="fu-card-actions">
           <button data-action="complete" data-idx="${idx}">✓ Complete</button>
@@ -2916,10 +3003,561 @@ Include every unique pair from the drug list. If a pair has no known interaction
 $('interaction-check-btn').addEventListener('click', checkInteractions);
 
 /* ============================================================
+   VIEW: SETTINGS
+   The one view that isn't a mirror of `state` — it persists to
+   localStorage directly (key 'remi_settings'), separate from the
+   shift simulation entirely, since pharmacy name / pharmacist /
+   tech name are configuration, not something Reset Shift should wipe.
+   @author Anam
+============================================================ */
+
+const DEFAULT_SETTINGS = {
+  pharmacyName: 'Main Street Pharmacy',
+  pharmacistName: '',
+  techName: '',
+  shiftStartTime: '09:00',
+  notifyOverdueFollowups: true,
+  notifyLowStock: true
+};
+
+/**
+ * Reads persisted app settings from localStorage, filling in any
+ * missing field from DEFAULT_SETTINGS — this is what lets new
+ * settings fields get added later without needing a migration step
+ * for techs who already have an older settings object saved.
+ * @returns {object} The merged settings object.
+ */
+function getAppSettings(){
+  try{
+    const saved = JSON.parse(localStorage.getItem('remi_settings') || '{}');
+    return { ...DEFAULT_SETTINGS, ...saved };
+  } catch(err){
+    console.log('[Remi] Failed to parse saved settings, using defaults:', err.message);
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+/**
+ * Persists settings to localStorage and immediately reflects the
+ * pharmacy name into the native window title (if running under
+ * Electron) and the document title (always) — see updateWindowTitle().
+ * @param {object} settings - Full settings object to save.
+ */
+function saveAppSettings(settings){
+  console.log('[Remi] Saving settings:', settings);
+  localStorage.setItem('remi_settings', JSON.stringify(settings));
+  updateWindowTitle();
+}
+
+/**
+ * Builds "Remi — [Pharmacy Name] — [Shift Time]" and applies it as
+ * both the document title (works in a plain browser tab) and, if
+ * `window.remiAPI` exists, the native Electron window title via IPC.
+ * Called from updateClock() on every simulated minute and whenever
+ * settings are saved, so the title always reflects the current
+ * pharmacy name and shift time without a dedicated polling loop.
+ */
+function updateWindowTitle(){
+  const s = getAppSettings();
+  const title = state.running || state.shiftMinutes > 0
+    ? `Remi — ${s.pharmacyName} — ${minutesToTimeStr(state.shiftMinutes)}`
+    : `Remi — ${s.pharmacyName}`;
+  document.title = title;
+  if(window.remiAPI) window.remiAPI.setTitle(title);
+}
+
+/**
+ * Renders the Settings form, pre-filled from getAppSettings(), and
+ * wires a single Save button that re-reads every field and persists
+ * them together — simpler and less error-prone than auto-saving each
+ * field on blur, at the cost of needing an explicit Save click.
+ */
+function renderSettingsView(){
+  console.log('[Remi] Rendering Settings view.');
+  const s = getAppSettings();
+  const apiKey = getApiKey();
+  $('settings-scroll').innerHTML = `
+    <div class="settings-section">
+      <h3>Pharmacy</h3>
+      <div class="settings-row"><label>Pharmacy name (shown in window title and reports)</label><input type="text" id="set-pharmacy-name" value="${escapeHtml(s.pharmacyName)}"></div>
+      <div class="settings-row"><label>Pharmacist on duty (for OBRA documentation)</label><input type="text" id="set-pharmacist-name" value="${escapeHtml(s.pharmacistName)}"></div>
+    </div>
+    <div class="settings-section">
+      <h3>Shift Configuration</h3>
+      <div class="settings-row"><label>Tech name</label><input type="text" id="set-tech-name" value="${escapeHtml(s.techName)}"></div>
+      <div class="settings-row"><label>Shift start time</label><input type="time" id="set-shift-start" value="${escapeHtml(s.shiftStartTime)}"></div>
+    </div>
+    <div class="settings-section">
+      <h3>API Key</h3>
+      <div class="settings-row">
+        <label>Anthropic API key</label>
+        <input type="password" id="set-api-key" value="${escapeHtml(apiKey)}" placeholder="sk-ant-...">
+      </div>
+      <div style="display:flex; gap:8px;">
+        <button class="btn btn-start" id="set-api-test">Test Connection</button>
+        <span id="set-api-test-result" style="font-size:11.5px; align-self:center; color:var(--tx2);"></span>
+      </div>
+    </div>
+    <div class="settings-section">
+      <h3>Notifications</h3>
+      <div class="settings-toggle"><span>Notify on overdue follow-ups</span><input type="checkbox" id="set-notify-followups" ${s.notifyOverdueFollowups ? 'checked' : ''}></div>
+      <div class="settings-toggle"><span>Notify on low/critical stock</span><input type="checkbox" id="set-notify-stock" ${s.notifyLowStock ? 'checked' : ''}></div>
+    </div>
+    <button class="btn btn-start" id="set-save">Save Settings</button>
+    <span class="settings-save-note" id="set-save-note">Saved.</span>
+  `;
+
+  $('set-save').addEventListener('click', () => {
+    const updated = {
+      pharmacyName: $('set-pharmacy-name').value.trim() || DEFAULT_SETTINGS.pharmacyName,
+      pharmacistName: $('set-pharmacist-name').value.trim(),
+      techName: $('set-tech-name').value.trim(),
+      shiftStartTime: $('set-shift-start').value || DEFAULT_SETTINGS.shiftStartTime,
+      notifyOverdueFollowups: $('set-notify-followups').checked,
+      notifyLowStock: $('set-notify-stock').checked
+    };
+    saveAppSettings(updated);
+    localStorage.setItem('remi_api_key', $('set-api-key').value.trim());
+    const note = $('set-save-note');
+    note.classList.add('show');
+    setTimeout(() => note.classList.remove('show'), 2000);
+  });
+
+  $('set-api-test').addEventListener('click', async () => {
+    const resultEl = $('set-api-test-result');
+    const key = $('set-api-key').value.trim();
+    if(!key){ resultEl.textContent = 'Enter a key first.'; resultEl.style.color = 'var(--amber)'; return; }
+    resultEl.textContent = 'Testing…'; resultEl.style.color = 'var(--tx2)';
+    console.log('[Remi] Testing API key connection.');
+    try{
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'content-type':'application/json', 'x-api-key': key, 'anthropic-version':'2023-06-01', 'anthropic-dangerous-direct-browser-access':'true' },
+        body: JSON.stringify({ model:'claude-sonnet-4-6', max_tokens: 8, messages:[{role:'user', content:'ping'}] })
+      });
+      const data = await resp.json();
+      console.log('[Remi] API key test response:', data);
+      if(resp.ok){ resultEl.textContent = '✓ Connected'; resultEl.style.color = 'var(--teal)'; }
+      else { resultEl.textContent = `✗ ${data?.error?.message || 'Connection failed'}`; resultEl.style.color = 'var(--red)'; }
+    } catch(err){
+      resultEl.textContent = `✗ ${err.message}`; resultEl.style.color = 'var(--red)';
+    }
+  });
+}
+
+/* ============================================================
+   VIEW: REPORTS
+   Compiled directly and deterministically from `state` — unlike the
+   Dashboard's reasoning panel (Claude's live narrative) or the
+   Interactions view (a one-off Claude call), a compliance report
+   should not depend on a live API call to exist or be reproducible.
+   generate_form106's TOOL_IMPL is reused here directly (it's a pure
+   function of `state`, see its doc comment) rather than re-deriving
+   the same DEA draft logic a second time.
+============================================================ */
+
+/**
+ * Renders the full Reports view: shift summary, the discrepancy log
+ * with investigation outcomes, and a Form 106 draft for any drug
+ * whose discrepancy history meets the recommend-filing threshold.
+ * Re-run on every view switch and after Generate Audit Package, so
+ * it always reflects the current shift state, not a stale snapshot.
+ */
+function renderReportsView(){
+  console.log('[Remi] Rendering Reports view.');
+  const s = getAppSettings();
+  const flaggedDrugs = Object.keys(state.cs).filter(k => state.csFlags[k] === 'flag');
+  const form106Drafts = flaggedDrugs.map(k => ({ key: k, ...TOOL_IMPL.generate_form106({ drug: k }) })).filter(d => d.discrepancy_count > 0);
+
+  $('reports-scroll').innerHTML = `
+    <div class="settings-section" style="max-width:680px;">
+      <h3>Shift Report</h3>
+      <div class="interaction-card">
+        <div style="font-size:13px; margin-bottom:10px;"><b>${escapeHtml(s.pharmacyName)}</b> ${s.pharmacistName ? `· Pharmacist on duty: ${escapeHtml(s.pharmacistName)}` : ''}${s.techName ? ` · Tech: ${escapeHtml(s.techName)}` : ''}</div>
+        <div class="interaction-detail">Shift time: ${minutesToTimeStr(state.shiftMinutes)} (started ${s.shiftStartTime})</div>
+        <div class="interaction-detail">Scripts filled: ${state.scripts} · Insurance rejects: ${state.rejects} · Agent flags raised: ${state.flags}</div>
+        <div class="interaction-detail">Diversion investigation: ${state.diversionDetected ? '<b style="color:var(--red);">OPEN — see Form 106 drafts below</b>' : 'None this shift'}</div>
+        <div class="interaction-detail">Open follow-ups: ${state.followupList.filter(f => (f.status||'open') !== 'completed').length}</div>
+      </div>
+    </div>
+
+    <div class="settings-section" style="max-width:680px;">
+      <h3>Discrepancy Log</h3>
+      ${state.oxyDiscrepancies.length ? `
+        <table class="data-table"><thead><tr><th>Time</th><th>Drug</th><th>Cycle</th><th>Gap</th><th>Outcome</th></tr></thead><tbody>
+          ${state.oxyDiscrepancies.map(d => `
+            <tr class="flagged">
+              <td class="mono-cell">${shortTime(d.at)}</td>
+              <td>${drugSpan('oxy')}</td>
+              <td class="mono-cell">#${d.n}</td>
+              <td class="mono-cell">${d.gap}</td>
+              <td>${state.diversionDetected ? 'Escalated — diversion pattern' : 'Unexplained — pharmacist review pending'}</td>
+            </tr>
+          `).join('')}
+        </tbody></table>
+      ` : `<div style="color:var(--tx3); font-size:12px;">No discrepancies recorded this shift.</div>`}
+    </div>
+
+    <div class="settings-section" style="max-width:680px;">
+      <h3>DEA Form 106 Drafts</h3>
+      ${form106Drafts.length ? form106Drafts.map(d => `
+        <div class="interaction-card" style="${d.form_106_recommended ? 'border-color:rgba(255,92,92,.35); background:var(--red-bg);' : ''}">
+          <div class="interaction-pair">${drugSpan(d.drug)} ${d.form_106_recommended ? '<span class="severity-pill contraindicated">FILING RECOMMENDED</span>' : '<span class="severity-pill minor">Monitoring</span>'}</div>
+          <div class="interaction-detail">${escapeHtml(d.draft_narrative)}</div>
+        </div>
+      `).join('') : `<div style="color:var(--tx3); font-size:12px;">No drugs currently meet the Form 106 review threshold.</div>`}
+    </div>
+  `;
+}
+
+/**
+ * "Generate Audit Package": re-renders the Reports view (ensuring
+ * it reflects the latest state) and immediately opens the print
+ * dialog — the spec's "export as PDF" path is the browser print
+ * dialog with a destination of "Save as PDF", which the @media print
+ * CSS rule (hiding the sidebar/topbar/buttons) is tuned for.
+ */
+function generateAuditPackage(){
+  console.log('[Remi] Generating audit package and opening print dialog.');
+  renderReportsView();
+  window.print();
+}
+$('reports-audit-package').addEventListener('click', generateAuditPackage);
+$('reports-print').addEventListener('click', () => window.print());
+
+/* ============================================================
+   ELECTRON INTEGRATION
+   Everything in this section is gated behind `if(window.remiAPI)` —
+   index.html must keep working with zero changes when opened
+   directly in a plain browser (no preload.js, no main.js underneath
+   it), since that's still a fully supported way to run Remi.
+   @author Anam
+============================================================ */
+
+/**
+ * Detects the Electron bridge and wires up everything native-only:
+ * platform-specific window chrome, the custom min/max/close buttons
+ * (Windows/Linux only — macOS gets real traffic lights for free, see
+ * main.js), and the menu-action listener. Called once at startup.
+ */
+function initElectronIntegration(){
+  if(!window.remiAPI){
+    console.log('[Remi] Running standalone in a browser — no Electron bridge.');
+    return;
+  }
+  console.log('[Remi] Electron bridge detected. Platform:', window.remiAPI.platform);
+  document.body.classList.add('is-electron');
+
+  if(window.remiAPI.platform === 'darwin'){
+    document.body.classList.add('is-electron-mac');
+  } else {
+    $('win-controls').classList.remove('hidden');
+    $('win-minimize').addEventListener('click', () => window.remiAPI.minimizeWindow());
+    $('win-maximize').addEventListener('click', () => window.remiAPI.maximizeWindow());
+    $('win-close').addEventListener('click', () => window.remiAPI.closeWindow());
+  }
+
+  window.remiAPI.onMenuAction(action => {
+    console.log('[Remi] Received menu action from main process:', action);
+    if(action === 'new-shift'){ resetShift(); startShift(); }
+    else if(action === 'end-shift') endShiftNow();
+    else if(action === 'export-report'){ switchView('reports'); generateAuditPackage(); }
+    else if(action === 'view-tech'){ if(patientMode.classList.contains('active')) $('btn-to-tech').click(); }
+    else if(action === 'view-patient'){ if(!patientMode.classList.contains('active')) $('btn-to-patient').click(); }
+    else if(action === 'toggle-sidebar') toggleSidebarPin();
+    else if(action === 'settings') switchView('settings');
+  });
+}
+
+/** Pins the sidebar open (220px) without needing hover, or un-pins it back to hover-to-expand — toggled by the View > Toggle Sidebar menu item (Cmd/Ctrl+B). */
+function toggleSidebarPin(){
+  $('sidebar').classList.toggle('pinned');
+  console.log('[Remi] Sidebar pinned:', $('sidebar').classList.contains('pinned'));
+}
+
+/* ============================================================
+   IN-BROWSER KEYBOARD SHORTCUTS
+   Only shortcuts that browsers don't already reserve at the OS/tab
+   level can live here — Cmd/Ctrl+N, +P, and +R are intercepted before
+   a page's JS ever sees them in most browsers, which is why those
+   three are handled exclusively via Electron menu accelerators above
+   instead (they work fully when running as the desktop app, and
+   simply don't exist as shortcuts in a plain browser tab — the
+   on-screen buttons still work everywhere).
+============================================================ */
+window.addEventListener('keydown', e => {
+  if(e.key === 'Escape' && patientMode.classList.contains('active')){
+    $('btn-to-tech').click();
+  } else if((e.metaKey || e.ctrlKey) && e.key === ','){
+    e.preventDefault();
+    if(patientMode.classList.contains('active')) $('btn-to-tech').click();
+    switchView('settings');
+  }
+});
+
+/* ============================================================
+   DRUG NAME WRAPPING
+   Marks drug names as interactive (`.drug-ref`) wherever they're
+   rendered, so the hover tooltip engine below has something to
+   attach to. Two strategies, depending on whether the call site
+   already knows it's rendering a drug name:
+     - drugSpan(): used at controlled render sites (feed cards, state
+       board rows, table cells) that already know exactly which drug
+       they're showing — just wrap it directly, no guessing needed.
+     - wrapDrugNames(): used where drug names appear inside free-form
+       text we don't control word-for-word (Claude's streamed
+       reasoning) — scans for known drug names and wraps matches.
+   @author Anam
+============================================================ */
+
+/**
+ * Wraps a drug (by key or already-resolved display name) in a
+ * `.drug-ref` span for the hover tooltip. Accepts either form so
+ * call sites that already have a key (e.g. table rows keyed by
+ * drug) and call sites that only have a resolved label (e.g. Patient
+ * Mode's `drug.label`) can both use one function.
+ * @param {string} nameOrKey - A key from `drugNames` (e.g. 'oxy') or an already-resolved display name (e.g. 'Oxycodone 5mg').
+ * @returns {string} HTML snippet: `<span class="drug-ref" data-drug="...">Display Name</span>`.
+ */
+function drugSpan(nameOrKey){
+  const display = drugNames[nameOrKey] || nameOrKey;
+  return `<span class="drug-ref" data-drug="${escapeHtml(display)}">${escapeHtml(display)}</span>`;
+}
+
+/**
+ * Scans already-HTML-escaped text for any known drug name (full name
+ * or its first/generic word, e.g. both "Oxycodone 5mg" and bare
+ * "Oxycodone" match) and wraps each match in a `.drug-ref` span,
+ * canonicalizing `data-drug` to the full display name regardless of
+ * which variant matched — so "oxycodone" in Claude's reasoning text
+ * still resolves to the same OpenFDA lookup as the table rows.
+ *
+ * Single combined-alternation regex, longest pattern first, so e.g.
+ * "Oxycodone 5mg" matches whole rather than matching just "Oxycodone"
+ * and leaving "5mg" dangling — and because `String.replace` scans the
+ * original string rather than re-scanning its own replacements,
+ * there's no risk of double-wrapping a match inside its own inserted span.
+ *
+ * @param {string} escapedText - Text that has already been through escapeHtml() — this function does not escape its input.
+ * @returns {string} The same text with drug-name substrings wrapped in `.drug-ref` spans.
+ */
+function wrapDrugNames(escapedText){
+  if(!wrapDrugNames._patterns){
+    const patterns = [];
+    Object.keys(drugNames).forEach(key => {
+      const full = drugNames[key];
+      const first = full.split(' ')[0];
+      patterns.push({ match: full, display: full });
+      if(first !== full) patterns.push({ match: first, display: full });
+    });
+    patterns.sort((a, b) => b.match.length - a.match.length);
+    wrapDrugNames._patterns = patterns;
+    wrapDrugNames._regex = new RegExp('\\b(' + patterns.map(p => p.match.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')\\b', 'gi');
+  }
+  return escapedText.replace(wrapDrugNames._regex, matched => {
+    const hit = wrapDrugNames._patterns.find(p => p.match.toLowerCase() === matched.toLowerCase());
+    const display = hit ? hit.display : matched;
+    return `<span class="drug-ref" data-drug="${escapeHtml(display)}">${matched}</span>`;
+  });
+}
+
+/**
+ * Watches the reasoning panel for new/changed text and retroactively
+ * wraps any drug names that stream in — this is what makes Claude's
+ * live reasoning text interactive without the streaming code in
+ * streamClaudeTurn() needing to know anything about tooltips.
+ *
+ * Debounced per-element (150ms) rather than reacting to every single
+ * token delta: streaming writes to `.textContent` many times per
+ * second, and wrapping on every delta would mean repeatedly tearing
+ * down and rebuilding that element's DOM mid-stream. Waiting for a
+ * brief pause means we wrap once the line has actually stopped
+ * changing. The `wrapped !== el.innerHTML` check before assigning is
+ * what prevents an infinite loop: re-wrapping unchanged text produces
+ * identical HTML, so no assignment happens, so the MutationObserver
+ * never fires again for that settle cycle.
+ */
+const drugWrapTimers = new WeakMap();
+function scheduleDrugWrap(el){
+  if(!el || !el.isConnected) return;
+  if(drugWrapTimers.has(el)) clearTimeout(drugWrapTimers.get(el));
+  drugWrapTimers.set(el, setTimeout(() => {
+    drugWrapTimers.delete(el);
+    const wrapped = wrapDrugNames(escapeHtml(el.textContent));
+    if(wrapped !== el.innerHTML) el.innerHTML = wrapped;
+  }, 150));
+}
+
+const reasoningDrugObserver = new MutationObserver(mutations => {
+  const touched = new Set();
+  mutations.forEach(m => {
+    const node = m.target.nodeType === Node.TEXT_NODE ? m.target.parentElement : m.target;
+    const line = node && node.closest && node.closest('.r-line, .r-conclusion');
+    if(line) touched.add(line);
+  });
+  touched.forEach(scheduleDrugWrap);
+});
+reasoningDrugObserver.observe(reasoningScroll, { childList: true, subtree: true, characterData: true });
+
+/* ============================================================
+   DRUG INFO TOOLTIP ENGINE
+   One singleton overlay card, shown/repositioned/repopulated for
+   whichever `.drug-ref` is currently hovered. Event delegation on
+   `document.body` (rather than a listener per span) means newly
+   wrapped drug names — including ones the MutationObserver wraps
+   after the fact — are interactive with zero extra wiring.
+============================================================ */
+
+const drugTooltipEl = document.createElement('div');
+drugTooltipEl.className = 'drug-tooltip-card';
+document.body.appendChild(drugTooltipEl);
+
+let tooltipShowTimer = null;
+let tooltipHideTimer = null;
+let tooltipCurrentTarget = null;
+
+/**
+ * Estimates the dosage form from FDA label dosing text using a small
+ * fixed vocabulary — OpenFDA has no structured "form" field separate
+ * from free-text dosing/administration sections, so this is a
+ * best-effort scan rather than a real lookup. Returns null (causing
+ * the FORM row to be omitted) rather than guessing wrong.
+ * @param {string} text - Label dosage/administration text, if any.
+ * @returns {string|null} Capitalized form name, or null if no known form word was found.
+ */
+function guessDosageForm(text){
+  if(!text) return null;
+  const forms = ['tablet','capsule','injection','solution','pen','cream','patch','suspension','syrup','ointment'];
+  const lower = text.toLowerCase();
+  const found = forms.find(f => lower.includes(f));
+  return found ? found.charAt(0).toUpperCase() + found.slice(1) : null;
+}
+
+/** Renders the schedule badge HTML, or '' if no schedule is known for this drug — CII gets the red ("highest practical risk in this app's drug set") treatment, CIII/CIV get amber. */
+function tooltipScheduleBadge(schedule){
+  if(!schedule) return '';
+  const cls = schedule === 'CII' ? 'red' : 'amber';
+  return `<span class="dt-schedule ${cls}">● Schedule ${schedule}</span>`;
+}
+
+/**
+ * Builds the tooltip card's inner HTML from a fetchDrugInfo() result.
+ * Every branch produces SOMETHING — per spec, a broken or empty
+ * tooltip is never acceptable, so offline/not-found/error all fall
+ * back to at least the drug name and (if known locally) its schedule.
+ * @param {string} drugName - The name that was hovered (used as a fallback label).
+ * @param {object} info - Result from fetchDrugInfo().
+ * @returns {string} Tooltip card inner HTML.
+ */
+function buildTooltipHtml(drugName, info){
+  if(info.offline){
+    return `<div class="dt-body">
+      <div class="dt-header"><span class="dt-title">${escapeHtml(drugName)}</span>${tooltipScheduleBadge(info.schedule)}</div>
+      <div class="dt-empty">Drug information requires network connection.</div>
+    </div>`;
+  }
+  if(info.notFound || info.error){
+    return `<div class="dt-body">
+      <div class="dt-header"><span class="dt-title">${escapeHtml(drugName)}</span>${tooltipScheduleBadge(info.schedule)}</div>
+      <div class="dt-empty">Extended information unavailable for this drug.</div>
+    </div>`;
+  }
+  const form = guessDosageForm(info.dosageText);
+  return `<div class="dt-body">
+    <div class="dt-header"><span class="dt-title">${escapeHtml(info.brandName || drugName)}</span>${tooltipScheduleBadge(info.schedule)}</div>
+    <div class="dt-divider"></div>
+    <div class="dt-row"><span class="dt-label">CLASS</span><span class="dt-value">${escapeHtml(info.pharmClass || '—')}</span></div>
+    ${form ? `<div class="dt-row"><span class="dt-label">FORM</span><span class="dt-value">${escapeHtml(form)}</span></div>` : ''}
+    <div class="dt-row"><span class="dt-label">ROUTE</span><span class="dt-value">${escapeHtml(info.route || '—')}</span></div>
+    ${info.boxedWarning ? `
+    <div class="dt-divider"></div>
+    <div class="dt-boxed"><div class="dt-boxed-title">⚠ BLACK BOX WARNING</div><div class="dt-boxed-text">${escapeHtml(excerpt(info.boxedWarning, 160))}</div></div>` : ''}
+    ${info.drugInteractionsText ? `
+    <div class="dt-divider"></div>
+    <div class="dt-section-title">KNOWN INTERACTIONS (FDA label)</div>
+    <div class="dt-text">${escapeHtml(excerpt(info.drugInteractionsText, 200))}</div>` : ''}
+    ${info.dosageText ? `
+    <div class="dt-divider"></div>
+    <div class="dt-section-title">DOSING (FDA label excerpt)</div>
+    <div class="dt-text">${escapeHtml(excerpt(info.dosageText, 180))}</div>` : ''}
+  </div>`;
+}
+
+/**
+ * Positions the tooltip relative to its trigger element, clamped
+ * horizontally to the viewport and flipping above the trigger when
+ * there isn't room below — checked using the tooltip's actual
+ * rendered height (`offsetHeight`), so the flip decision is correct
+ * regardless of how much content this particular drug has.
+ * @param {HTMLElement} target - The hovered `.drug-ref` span.
+ */
+function positionTooltip(target){
+  const rect = target.getBoundingClientRect();
+  const tw = drugTooltipEl.offsetWidth || 320;
+  const th = drugTooltipEl.offsetHeight || 160;
+  const left = Math.min(Math.max(8, rect.left), window.innerWidth - tw - 8);
+  let top = rect.bottom + 8;
+  const fitsBelow = top + th <= window.innerHeight - 8;
+  if(!fitsBelow && rect.top - th - 8 > 8){
+    top = rect.top - th - 8; // not enough room below and there IS room above — flip up
+  }
+  drugTooltipEl.style.left = left + 'px';
+  drugTooltipEl.style.top = top + 'px';
+}
+
+/**
+ * Shows the tooltip for a target, fetching its info if needed.
+ * Renders a brief loading state first so positionTooltip() has real
+ * content to measure, then re-positions once the real content (which
+ * is almost always a different height) is in.
+ * @param {HTMLElement} target - The hovered `.drug-ref` span.
+ */
+async function showTooltipFor(target){
+  tooltipCurrentTarget = target;
+  const drugName = target.dataset.drug;
+  drugTooltipEl.innerHTML = `<div class="dt-body"><div class="dt-empty">Loading drug information…</div></div>`;
+  drugTooltipEl.classList.add('show');
+  positionTooltip(target);
+
+  const info = await fetchDrugInfo(drugName);
+  if(tooltipCurrentTarget !== target) return; // moved to a different drug (or away) before this resolved
+  drugTooltipEl.innerHTML = buildTooltipHtml(drugName, info);
+  positionTooltip(target);
+}
+
+function scheduleShowTooltip(target){
+  clearTimeout(tooltipHideTimer);
+  clearTimeout(tooltipShowTimer);
+  tooltipShowTimer = setTimeout(() => showTooltipFor(target), 300); // 300ms delay per spec, prevents flicker when the mouse just passes over text
+}
+function scheduleHideTooltip(){
+  clearTimeout(tooltipShowTimer);
+  tooltipHideTimer = setTimeout(() => {
+    drugTooltipEl.classList.remove('show');
+    tooltipCurrentTarget = null;
+  }, 80);
+}
+
+document.body.addEventListener('mouseover', e => {
+  const ref = e.target.closest && e.target.closest('.drug-ref');
+  if(ref) scheduleShowTooltip(ref);
+});
+document.body.addEventListener('mouseout', e => {
+  const ref = e.target.closest && e.target.closest('.drug-ref');
+  // Only schedule a hide if the mouse is actually leaving the drug-ref
+  // (not just moving between child nodes inside it) — relatedTarget is
+  // where the pointer is going.
+  if(ref && !ref.contains(e.relatedTarget)) scheduleHideTooltip();
+});
+drugTooltipEl.addEventListener('mouseenter', () => clearTimeout(tooltipHideTimer)); // staying open when the mouse moves onto the card itself
+drugTooltipEl.addEventListener('mouseleave', scheduleHideTooltip);
+
+/* ============================================================
    INIT
 ============================================================ */
 renderStateBoard();
 updateClock();
+initElectronIntegration();
 </script>
 </body>
 </html>
