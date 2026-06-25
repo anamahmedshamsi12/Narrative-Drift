@@ -177,6 +177,22 @@ function buildAppMenu(){
       ]
     },
     {
+      // Without an Edit menu, macOS never registers Cmd+C/V/X/A as
+      // accelerators anywhere in the app — they silently do nothing
+      // in every text input, including the API key field. The roles
+      // below are Electron/macOS built-ins; no click handlers needed.
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' }
+      ]
+    },
+    {
       label: 'View',
       submenu: [
         { label: 'Tech Mode', accelerator: 'CmdOrCtrl+T', click: () => sendMenuAction('view-tech') },
