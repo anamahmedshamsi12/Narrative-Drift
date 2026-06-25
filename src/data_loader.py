@@ -1,38 +1,37 @@
-"""Data loading and cleaning utilities for Narrative Drift."""
+"""
+Data loading utilities for Narrative Drift.
+
+This module stays as the stable entry point for loading post data across the codebase.
+Actual CSV I/O + preprocessing live in src/io.py and src/preprocess.py.
+"""
 
 from __future__ import annotations
 
-import re
-from typing import Iterable
+from pathlib import Path
+from typing import Union
 
 import pandas as pd
 
-URL_PATTERN = re.compile(r"https?://\S+|www\.\S+")
-WHITESPACE_PATTERN = re.compile(r"\s+")
+from .io import load_posts_csv
 
 
-REQUIRED_COLUMNS = {"post_id", "user", "timestamp", "text"}
+PathLike = Union[str, Path]
 
 
-def _clean_text(value: str) -> str:
-    if not isinstance(value, str):
-        return ""
-    value = URL_PATTERN.sub("", value)
-    value = WHITESPACE_PATTERN.sub(" ", value)
-    return value.strip()
+def load_posts(csv_path: PathLike) -> pd.DataFrame:
+    """
+    Load and return a cleaned posts DataFrame with required columns:
+      - post_id
+      - user
+      - timestamp
+      - text
+
+    Cleaning includes URL removal, whitespace normalization, and timestamp parsing.
+    """
+    return load_posts_csv(csv_path)
 
 
-def clean_text_series(series: Iterable[str]) -> pd.Series:
-    return pd.Series((_clean_text(text) for text in series))
+# Backward-compatible alias (useful if other modules still import load_data)
+def load_data(csv_path: PathLike) -> pd.DataFrame:
+    return load_posts(csv_path)
 
-
-def load_posts(csv_path: str) -> pd.DataFrame:
-    df = pd.read_csv(csv_path)
-    missing = REQUIRED_COLUMNS - set(df.columns)
-    if missing:
-        raise ValueError(f"Missing required columns: {sorted(missing)}")
-
-    df = df.copy()
-    df["text_clean"] = clean_text_series(df["text"])
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    return df
