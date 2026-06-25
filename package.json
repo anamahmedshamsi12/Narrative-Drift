@@ -1,0 +1,38 @@
+{
+  "name": "remi-rx",
+  "version": "1.0.0",
+  "description": "Agentic AI assistant for the retail pharmacy counter",
+  "main": "main.js",
+  "author": "Anam",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder"
+  },
+  "dependencies": {
+    "electron": "latest"
+  },
+  "devDependencies": {
+    "electron-builder": "latest"
+  },
+  "build": {
+    "appId": "com.remi.pharmacy",
+    "productName": "Remi",
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "assets/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.medical",
+      "icon": "assets/icon.png"
+    },
+    "win": {
+      "icon": "assets/icon.png"
+    },
+    "linux": {
+      "icon": "assets/icon.png"
+    }
+  }
+}

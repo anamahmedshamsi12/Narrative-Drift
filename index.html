@@ -1,0 +1,2925 @@
+<!--
+  Remi — AI Pharmacy Agent
+
+  @file index.html
+  @description Single-page agentic AI assistant for the retail pharmacy
+                counter. Operates in two modes: Tech Mode for pharmacy staff
+                and Patient Mode for patients at pickup. Tech Mode runs an
+                autonomous monitoring loop — every simulated shift event is
+                handed to the Claude API with a set of pharmacy tools, and
+                Claude decides what to investigate and what to do. This is
+                real multi-step tool-use, not pre-written reasoning text.
+
+  @architecture
+    - state                 Single global object holding all shift data
+                             (inventory, controlled-substance counts,
+                             discrepancy history, follow-up queue, UI flags).
+                             Read and written by both Tech Mode and Patient
+                             Mode, and by every tool implementation.
+    - Simulation Engine      `events` (scripted timeline) + `advanceMinute()`
+                             fire shift events at fixed simulated-shift
+                             minutes; speed is just the real-ms-per-simulated-
+                             minute tick interval.
+    - runAgentTurn()         The agentic loop. Called once per shift event.
+                             Sends the event + a state snapshot to Claude
+                             with tool definitions, executes whichever
+                             tools Claude selects, feeds results back, and
+                             repeats until Claude stops calling tools and
+                             gives a final conclusion.
+    - TOOLS / TOOL_IMPL      The tool layer. TOOLS is the JSON schema handed
+                             to the Claude API; TOOL_IMPL holds the matching
+                             JS functions that actually read/write `state`
+                             when Claude calls a tool.
+    - UI Layer               Tech Mode dashboard (live feed, reasoning
+                             panel, state board), Patient Mode pickup flow,
+                             and the EKG/status chrome connecting them.
+
+  @author Anam
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Remi — AI Pharmacy Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#080D1A; --s1:#0E1525; --s2:#151E30; --s3:#1C2640;
+  --teal:#00D4AA; --teal-bg:rgba(0,212,170,0.12); --teal-bd:rgba(0,212,170,0.25);
+  --red:#FF5C5C; --red-bg:rgba(255,92,92,0.12);
+  --amber:#FFB347; --amber-bg:rgba(255,179,71,0.12);
+  --blue:#4DA6FF; --blue-bg:rgba(77,166,255,0.12);
+  --tx1:#EDF0F7; --tx2:#8896B0; --tx3:#4A5568;
+  --bd1:rgba(255,255,255,0.06); --bd2:rgba(255,255,255,0.1);
+}
+*{box-sizing:border-box; margin:0; padding:0;}
+body{font-family:'Space Grotesk',sans-serif; background:var(--bg); color:var(--tx1); overflow:hidden;}
+.mono{font-family:'JetBrains Mono',monospace;}
+button{font-family:inherit; cursor:pointer; border:none; background:none; color:inherit;}
+input{font-family:inherit;}
+::-webkit-scrollbar{width:6px;}
+::-webkit-scrollbar-thumb{background:var(--s3); border-radius:3px;}
+::-webkit-scrollbar-track{background:transparent;}
+
+/* ===== APP SHELL ===== */
+#app{position:relative; width:100vw; height:100vh;}
+.responsive-warning{display:none; position:fixed; inset:0; background:var(--bg); color:var(--tx2); align-items:center; justify-content:center; text-align:center; padding:40px; font-size:16px; z-index:9999;}
+
+/* ===== API KEY MODAL ===== */
+.key-modal-overlay{display:none; position:fixed; inset:0; background:rgba(2,5,12,.7); align-items:center; justify-content:center; z-index:9000;}
+.key-modal-overlay.active{display:flex;}
+.key-modal{background:var(--s1); border:1px solid var(--bd2); border-radius:12px; padding:24px; width:380px; max-width:90vw;}
+.key-modal h3{font-size:14px; margin-bottom:8px;}
+.key-modal p{font-size:11.5px; color:var(--tx2); line-height:1.5; margin-bottom:14px;}
+.key-modal input{width:100%; height:34px; background:var(--s2); border:1px solid var(--bd1); border-radius:7px; padding:0 10px; color:var(--tx1); font-size:12.5px; outline:none; font-family:'JetBrains Mono',monospace; margin-bottom:12px;}
+.key-modal input:focus{border-color:var(--teal-bd);}
+.key-modal-actions{display:flex; gap:8px; justify-content:flex-end;}
+
+/* ===== SIDEBAR NAVIGATION =====
+   Persistent left rail across all of Tech Mode. Collapsed to icons by
+   default (48px); hovering the rail expands it to 220px with labels.
+   This is what makes Remi feel like installed software with distinct
+   sections rather than a single dashboard screen. */
+#sidebar{
+  flex:0 0 48px; width:48px; height:100vh; background:var(--s1);
+  border-right:1px solid var(--bd1); display:flex; flex-direction:column;
+  overflow:hidden; transition:width .2s ease, flex-basis .2s ease; z-index:200;
+  -webkit-app-region:no-drag; /* never part of the Electron titlebar drag region */
+}
+#sidebar:hover{flex:0 0 220px; width:220px;}
+.sidebar-logo{height:52px; flex:0 0 52px; display:flex; align-items:center; gap:10px; padding:0 12px; border-bottom:1px solid var(--bd1);}
+.sidebar-logo .mark{width:26px; height:26px; border-radius:6px; background:var(--teal-bg); border:1px solid var(--teal-bd); display:flex; align-items:center; justify-content:center; color:var(--teal); font-size:14px; flex:0 0 auto;}
+.sidebar-logo .label{font-weight:600; font-size:13px; white-space:nowrap; opacity:0; transition:opacity .15s ease;}
+#sidebar:hover .sidebar-logo .label{opacity:1;}
+.sidebar-nav{flex:1; display:flex; flex-direction:column; padding:8px 0; overflow:hidden;}
+.sidebar-spacer{flex:1;}
+.sidebar-item{
+  display:flex; align-items:center; gap:12px; height:40px; padding:0 14px;
+  border-left:3px solid transparent; color:var(--tx2); font-size:12.5px;
+  white-space:nowrap; cursor:pointer; transition:background .15s ease, color .15s ease;
+}
+.sidebar-item:hover{background:var(--s2); color:var(--tx1);}
+.sidebar-item .ic{font-size:16px; width:18px; text-align:center; flex:0 0 auto;}
+.sidebar-item .lbl{opacity:0; transition:opacity .15s ease;}
+#sidebar:hover .sidebar-item .lbl{opacity:1;}
+.sidebar-item.active{border-left-color:var(--teal); background:var(--teal-bg); color:var(--teal);}
+
+/* ===== VIEW SWITCHING =====
+   Everything to the right of the sidebar lives in `.tech-content`, a
+   column the topbar/EKG strip sit above and the active `.view` fills.
+   Only one `.view` is ever `display:flex` at a time — this is the same
+   show-one-hide-rest pattern as the Tech/Patient mode `.active` toggle,
+   just scoped inside Tech Mode instead of across the whole app. */
+.tech-content{display:flex; flex-direction:column; flex:1; min-width:0; height:100vh;}
+.view-area{flex:1; min-height:0; overflow:hidden; display:flex; flex-direction:column;}
+.view{display:none; flex:1; min-height:0; flex-direction:column; overflow:hidden;}
+.view.active{display:flex;}
+.view-scroll{flex:1; overflow-y:auto; padding:20px 24px;}
+.view-header{flex:0 0 auto; padding:16px 24px; border-bottom:1px solid var(--bd1); display:flex; align-items:center; gap:12px;}
+.view-header h2{font-size:16px; font-weight:600;}
+.view-header .view-sub{font-size:11.5px; color:var(--tx2);}
+.view-actions{margin-left:auto; display:flex; gap:8px;}
+
+/* Shared table styling, used by Dispensing / Reports */
+.data-table{width:100%; border-collapse:collapse; font-size:12.5px;}
+.data-table th{text-align:left; font-size:10.5px; letter-spacing:.05em; text-transform:uppercase; color:var(--tx3); padding:8px 10px; border-bottom:1px solid var(--bd1); position:sticky; top:0; background:var(--bg);}
+.data-table td{padding:9px 10px; border-bottom:1px solid var(--bd1); color:var(--tx1);}
+.data-table tr.flagged td{color:var(--red);}
+.data-table .mono-cell{font-family:'JetBrains Mono',monospace;}
+
+.filter-bar{display:flex; align-items:center; gap:10px; margin-bottom:16px; flex-wrap:wrap;}
+.filter-bar select, .filter-bar input{background:var(--s2); border:1px solid var(--bd1); border-radius:6px; color:var(--tx1); font-size:12px; padding:6px 10px; outline:none;}
+.filter-bar select:focus, .filter-bar input:focus{border-color:var(--teal-bd);}
+
+/* Inventory grid */
+.inv-grid-table input.inv-edit{width:64px; background:var(--s2); border:1px solid var(--bd1); border-radius:5px; color:var(--tx1); font-family:'JetBrains Mono',monospace; font-size:12px; padding:4px 6px;}
+.pill{display:inline-block; font-size:10px; font-weight:600; padding:2px 8px; border-radius:20px; letter-spacing:.03em;}
+.pill.good{background:var(--teal-bg); color:var(--teal);}
+.pill.warn{background:var(--amber-bg); color:var(--amber);}
+.pill.low{background:var(--red-bg); color:var(--red);}
+
+/* Follow-up cards (view version, richer than the sidebar widget) */
+.fu-card{background:var(--s1); border:1px solid var(--bd1); border-radius:10px; padding:14px; margin-bottom:10px;}
+.fu-card.overdue{border-color:rgba(255,92,92,.35); background:var(--red-bg);}
+.fu-card-top{display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;}
+.fu-card-actions{display:flex; gap:6px; margin-top:10px;}
+.fu-card-actions button{font-size:11px; padding:5px 10px; border-radius:6px; background:var(--s2); color:var(--tx2); border:1px solid var(--bd1);}
+.fu-card-actions button:hover{color:var(--tx1);}
+
+/* Interaction severity matrix */
+.severity-pill{font-size:10.5px; font-weight:700; padding:3px 9px; border-radius:6px; letter-spacing:.03em;}
+.severity-pill.contraindicated{background:var(--red-bg); color:var(--red);}
+.severity-pill.major{background:rgba(255,92,92,0.08); color:var(--red);}
+.severity-pill.moderate{background:var(--amber-bg); color:var(--amber);}
+.severity-pill.minor{background:var(--blue-bg); color:var(--blue);}
+.severity-pill.none{background:var(--teal-bg); color:var(--teal);}
+.interaction-card{background:var(--s1); border:1px solid var(--bd1); border-radius:10px; padding:14px; margin-bottom:10px;}
+.interaction-pair{font-family:'JetBrains Mono',monospace; font-size:13px; margin-bottom:6px;}
+.interaction-detail{font-size:12px; color:var(--tx2); line-height:1.6;}
+.interaction-detail b{color:var(--tx1);}
+
+/* Settings form */
+.settings-section{max-width:460px; margin-bottom:28px;}
+.settings-section h3{font-size:12.5px; text-transform:uppercase; letter-spacing:.05em; color:var(--tx2); margin-bottom:12px;}
+.settings-row{margin-bottom:14px;}
+.settings-row label{display:block; font-size:11.5px; color:var(--tx2); margin-bottom:5px;}
+.settings-row input[type=text], .settings-row input[type=password], .settings-row input[type=time]{width:100%; height:34px; background:var(--s2); border:1px solid var(--bd1); border-radius:7px; padding:0 10px; color:var(--tx1); font-size:12.5px; outline:none;}
+.settings-row input:focus{border-color:var(--teal-bd);}
+.settings-toggle{display:flex; align-items:center; justify-content:space-between; padding:8px 0;}
+.settings-save-note{font-size:11px; color:var(--teal); margin-top:6px; opacity:0; transition:opacity .2s ease;}
+.settings-save-note.show{opacity:1;}
+
+@media print{
+  #sidebar, .topbar, .ekg-strip, .cmdbar, .view-header .view-actions{ display:none !important; }
+  body, #app, .tech-content, .view-area{ overflow:visible !important; height:auto !important; background:#fff !important; color:#000 !important; }
+  .view.active{ display:block !important; }
+  .view-scroll{ overflow:visible !important; padding:0 !important; }
+}
+
+/* ===== TECH MODE ===== */
+#tech-mode{display:flex; flex-direction:row; height:100vh; opacity:1; transition:opacity .3s ease, transform .3s ease;}
+
+.topbar{height:52px; flex:0 0 52px; display:flex; align-items:center; gap:20px; padding:0 16px; background:var(--s1); border-bottom:1px solid var(--bd1);}
+.brand{display:flex; align-items:center; gap:8px;}
+.brand-icon{width:26px; height:26px; border-radius:6px; background:var(--teal-bg); border:1px solid var(--teal-bd); display:flex; align-items:center; justify-content:center; color:var(--teal); font-size:14px;}
+.brand-text{display:flex; flex-direction:column; line-height:1.1;}
+.brand-text .name{font-weight:600; font-size:15px;}
+.brand-text .sub{font-family:'JetBrains Mono',monospace; font-size:9px; color:var(--tx2); letter-spacing:.04em;}
+
+.sim-controls{display:flex; align-items:center; gap:8px;}
+.btn{padding:6px 12px; border-radius:6px; font-size:12px; font-weight:500; transition:all .15s ease; border:1px solid transparent; white-space:nowrap;}
+.btn-start{background:var(--teal-bg); color:var(--teal); border-color:var(--teal-bd);}
+.btn-start:hover{background:rgba(0,212,170,0.22);}
+.btn-pause{background:var(--amber-bg); color:var(--amber); border-color:rgba(255,179,71,.25);}
+.btn-reset{background:var(--s3); color:var(--tx2); border-color:var(--bd2);}
+.btn-reset:hover{color:var(--tx1);}
+.hidden{display:none !important;}
+
+.speed-pills{display:flex; gap:4px; background:var(--s2); padding:3px; border-radius:7px;}
+.speed-pill{padding:4px 10px; border-radius:5px; font-size:11px; font-family:'JetBrains Mono',monospace; color:var(--tx2);}
+.speed-pill.active{background:var(--teal-bg); color:var(--teal);}
+
+.shift-clock{font-family:'JetBrains Mono',monospace; font-size:14px; color:var(--tx1); letter-spacing:.03em;}
+.shift-clock .lbl{font-size:9px; color:var(--tx3); display:block; letter-spacing:.06em;}
+
+.spacer{flex:1;}
+
+.agent-status{display:flex; align-items:center; gap:7px; font-size:12px; color:var(--tx2);}
+.status-dot{width:7px; height:7px; border-radius:50%; background:var(--tx3);}
+.status-dot.live{background:var(--teal); box-shadow:0 0 0 0 rgba(0,212,170,.6); animation:pulse-dot 1.6s infinite;}
+@keyframes pulse-dot{0%{box-shadow:0 0 0 0 rgba(0,212,170,.5);}70%{box-shadow:0 0 0 6px rgba(0,212,170,0);}100%{box-shadow:0 0 0 0 rgba(0,212,170,0);}}
+
+.mode-switch-btn{background:var(--s3); color:var(--teal); padding:7px 14px; border-radius:7px; font-size:12px; font-weight:500; border:1px solid var(--teal-bd);}
+.mode-switch-btn:hover{background:var(--teal-bg);}
+
+/* EKG */
+.ekg-strip{height:32px; flex:0 0 32px; background:var(--s1); border-bottom:1px solid var(--bd1); position:relative;}
+#ekg-canvas{width:100%; height:100%; display:block;}
+
+/* main workspace */
+.workspace{flex:1; display:grid; grid-template-columns:280px 1fr 280px; overflow:hidden; min-height:0;}
+.panel{display:flex; flex-direction:column; min-height:0; overflow:hidden;}
+.panel-header{padding:12px 14px; font-size:11px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; color:var(--tx2); border-bottom:1px solid var(--bd1); flex:0 0 auto;}
+.panel-scroll{flex:1; overflow-y:auto; padding:10px;}
+
+/* LEFT: feed */
+#feed-panel{background:var(--s1); border-right:1px solid var(--bd1);}
+.feed-card{background:var(--s2); border-radius:8px; padding:9px 10px; margin-bottom:8px; border-left:3px solid var(--tx3); animation:slideIn .35s ease;}
+@keyframes slideIn{from{opacity:0; transform:translateX(-16px);}to{opacity:1; transform:translateX(0);}}
+.feed-card.t-fill{border-left-color:var(--blue);}
+.feed-card.t-reject{border-left-color:var(--amber);}
+.feed-card.t-discrepancy{border-left-color:var(--red);}
+.feed-card.t-shortage{border-left-color:var(--amber);}
+.feed-card.t-diversion{border-left-color:var(--red); background:var(--red-bg);}
+.feed-badge{display:inline-block; font-size:9px; font-weight:600; letter-spacing:.05em; padding:2px 6px; border-radius:4px; margin-bottom:5px; font-family:'JetBrains Mono',monospace;}
+.feed-badge.t-fill{background:var(--blue-bg); color:var(--blue);}
+.feed-badge.t-reject{background:var(--amber-bg); color:var(--amber);}
+.feed-badge.t-discrepancy{background:var(--red-bg); color:var(--red);}
+.feed-badge.t-shortage{background:var(--amber-bg); color:var(--amber);}
+.feed-badge.t-diversion{background:var(--red-bg); color:var(--red); font-weight:700;}
+.feed-drug{font-family:'JetBrains Mono',monospace; font-size:12.5px; font-weight:500; color:var(--tx1); margin-bottom:2px;}
+.feed-detail{font-size:11px; color:var(--tx2); margin-bottom:5px; line-height:1.35;}
+.feed-time{font-family:'JetBrains Mono',monospace; font-size:9.5px; color:var(--tx3);}
+
+/* CENTER: reasoning */
+#reasoning-panel{background:var(--bg);}
+.idle-state{flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; color:var(--tx3); text-align:center; padding:40px;}
+.idle-icon{width:56px; height:56px; border-radius:50%; background:var(--s2); display:flex; align-items:center; justify-content:center; font-size:24px; color:var(--teal); opacity:.6;}
+.idle-state p{font-size:13px; color:var(--tx2); max-width:340px; line-height:1.5;}
+
+.r-block{background:var(--s1); border:1px solid var(--bd1); border-radius:10px; margin-bottom:14px; overflow:hidden; animation:fadeUp .4s ease;}
+@keyframes fadeUp{from{opacity:0; transform:translateY(10px);}to{opacity:1; transform:translateY(0);}}
+.r-header{display:flex; align-items:center; gap:8px; padding:11px 14px; border-bottom:1px solid var(--bd1); font-size:13px; font-weight:500;}
+.r-header .r-icon{font-size:15px;}
+.r-header .r-time{margin-left:auto; font-family:'JetBrains Mono',monospace; font-size:10.5px; color:var(--tx3);}
+.r-body{padding:10px 14px; display:flex; flex-direction:column; gap:5px;}
+.r-line{font-family:'JetBrains Mono',monospace; font-size:12px; line-height:1.5; opacity:0; animation:lineIn .3s ease forwards; white-space:pre-wrap;}
+@keyframes lineIn{from{opacity:0; transform:translateX(-4px);}to{opacity:1; transform:translateX(0);}}
+.r-line.step{color:var(--tx2);}
+.r-line.flag{color:var(--red);}
+.r-line.ok{color:var(--teal);}
+.r-line.warn{color:var(--amber);}
+.r-line.tool{color:var(--blue);}
+.r-conclusion{padding:10px 14px; font-size:12.5px; font-weight:500; border-left:3px solid var(--tx3); background:rgba(255,255,255,.02); margin:0 14px 12px; border-radius:6px;}
+.r-conclusion.amber{border-left-color:var(--amber); background:var(--amber-bg); color:var(--amber);}
+.r-conclusion.red{border-left-color:var(--red); background:var(--red-bg); color:var(--red);}
+.r-conclusion.teal{border-left-color:var(--teal); background:var(--teal-bg); color:var(--teal);}
+.r-conclusion.bold{font-weight:700; font-size:13px;}
+.r-conclusion.dramatic{animation:pulseBorder 1.2s ease 1;}
+@keyframes pulseBorder{0%{box-shadow:0 0 0 0 rgba(255,92,92,.6);}70%{box-shadow:0 0 0 8px rgba(255,92,92,0);}100%{box-shadow:0 0 0 0 rgba(255,92,92,0);}}
+
+/* RIGHT: state board */
+#state-panel{background:var(--s1); border-left:1px solid var(--bd1);}
+.sb-section{padding:12px 14px; border-bottom:1px solid var(--bd1);}
+.sb-title{font-size:10.5px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; color:var(--tx2); margin-bottom:10px;}
+.stat-grid{display:grid; grid-template-columns:1fr 1fr; gap:8px;}
+.stat-card{background:var(--s2); border-radius:8px; padding:10px; text-align:center;}
+.stat-num{font-family:'JetBrains Mono',monospace; font-size:22px; font-weight:500; color:var(--tx1); transition:color .2s ease;}
+.stat-num.teal{color:var(--teal);}
+.stat-num.red{color:var(--red);}
+.stat-num.amber{color:var(--amber);}
+.stat-num.flash{color:var(--teal) !important;}
+.stat-lbl{font-size:9.5px; color:var(--tx2); margin-top:3px;}
+
+.diversion-banner{display:none; background:var(--red-bg); border:1px solid rgba(255,92,92,.4); border-radius:8px; padding:12px; margin-bottom:0;}
+.diversion-banner.show{display:block; animation:pulseBorder 1.2s ease 1;}
+.diversion-banner h4{color:var(--red); font-size:12.5px; margin-bottom:6px; display:flex; align-items:center; gap:5px;}
+.diversion-banner .dline{font-size:11px; color:var(--tx1); line-height:1.5; margin-bottom:2px;}
+.diversion-banner .dline b{font-family:'JetBrains Mono',monospace;}
+
+.cs-row, .inv-row, .fu-row{display:flex; align-items:center; justify-content:space-between; padding:7px 8px; border-radius:6px; margin-bottom:4px; font-size:12px;}
+.cs-row{background:var(--s2);}
+.cs-row.flagged{background:var(--red-bg);}
+.cs-row.critical{background:rgba(255,92,92,.22);}
+.cs-name{font-family:'JetBrains Mono',monospace; font-size:11.5px;}
+.cs-count{font-family:'JetBrains Mono',monospace; font-size:11.5px; color:var(--tx2); margin-right:8px;}
+.cs-status{font-size:11px; white-space:nowrap;}
+.cs-status.ok{color:var(--teal);}
+.cs-status.flag{color:var(--red); font-weight:600;}
+.cs-status.due{color:var(--amber);}
+
+.inv-row{background:var(--s2); flex-direction:column; align-items:stretch; gap:4px;}
+.inv-row.warn{background:var(--amber-bg);}
+.inv-row.low{background:var(--red-bg);}
+.inv-top{display:flex; justify-content:space-between; font-size:11.5px;}
+.inv-top .nm{font-weight:500;}
+.inv-top .ct{font-family:'JetBrains Mono',monospace; color:var(--tx2);}
+.inv-bar-track{height:4px; background:var(--s3); border-radius:2px; overflow:hidden;}
+.inv-bar-fill{height:100%; border-radius:2px; background:var(--teal); transition:width .4s ease;}
+.inv-bar-fill.warn{background:var(--amber);}
+.inv-bar-fill.low{background:var(--red);}
+
+.fu-row{background:var(--s2); align-items:flex-start; flex-direction:column; gap:2px;}
+.fu-row.overdue{background:var(--red-bg);}
+.fu-top{display:flex; align-items:center; gap:6px; font-weight:500; font-size:12px;}
+.fu-dot{width:6px; height:6px; border-radius:50%; background:var(--amber); flex:0 0 auto;}
+.fu-row.overdue .fu-dot{background:var(--red);}
+.fu-reason{font-size:10.5px; color:var(--tx2);}
+.fu-time{font-size:10px; color:var(--tx3); font-family:'JetBrains Mono',monospace;}
+
+/* bottom command bar */
+.cmdbar{height:44px; flex:0 0 44px; display:flex; align-items:center; gap:8px; padding:0 12px; background:var(--s1); border-top:1px solid var(--bd1);}
+#cmd-input{flex:1; height:30px; background:var(--s2); border:1px solid var(--bd1); border-radius:7px; padding:0 12px; color:var(--tx1); font-size:12.5px; outline:none;}
+#cmd-input:focus{border-color:var(--teal-bd);}
+#cmd-input::placeholder{color:var(--tx3);}
+.cmd-send{background:var(--teal-bg); color:var(--teal); border:1px solid var(--teal-bd); padding:6px 16px; border-radius:7px; font-size:12.5px; font-weight:500;}
+.cmd-send:hover{background:rgba(0,212,170,.22);}
+.cmd-send:disabled{opacity:.5; cursor:default;}
+
+/* ===== PATIENT MODE ===== */
+#patient-mode{position:fixed; inset:0; background:#F8FFFE; color:#1A2332; display:flex; align-items:center; justify-content:center; opacity:0; visibility:hidden; transform:scale(.98); transition:opacity .3s ease, transform .3s ease; z-index:500; font-family:'Space Grotesk',sans-serif;}
+#patient-mode.active{opacity:1; visibility:visible; transform:scale(1);}
+#tech-mode.swapped{opacity:0; transform:scale(.98); pointer-events:none;}
+
+.patient-shell{width:100%; max-width:480px; padding:32px; position:relative;}
+.back-link{position:absolute; top:-8px; left:32px; font-size:12px; color:#4A6572; opacity:.8;}
+.back-link:hover{opacity:1; color:#00A885;}
+
+.remi-avatar{width:64px; height:64px; border-radius:50%; background:#fff; border:2px solid #00A885; display:flex; align-items:center; justify-content:center; margin:0 auto 14px; position:relative;}
+.remi-avatar .r-letter{font-size:26px; font-weight:600; color:#00A885;}
+.remi-avatar .r-smile{position:absolute; bottom:15px; width:18px; height:9px; border-bottom:2px solid #00A885; border-radius:0 0 50% 50%;}
+.patient-greeting{text-align:center; font-size:14px; color:#4A6572; margin-bottom:24px;}
+
+.patient-card{background:#fff; border:1px solid rgba(0,168,133,0.2); border-radius:18px; padding:32px 28px; box-shadow:0 10px 40px rgba(0,40,30,0.06);}
+
+.p-step{animation:slideStepIn .35s ease;}
+@keyframes slideStepIn{from{opacity:0; transform:translateX(24px);}to{opacity:1; transform:translateX(0);}}
+.p-step.back{animation-name:slideStepInBack;}
+@keyframes slideStepInBack{from{opacity:0; transform:translateX(-24px);}to{opacity:1; transform:translateX(0);}}
+
+.p-title{font-size:21px; font-weight:600; text-align:center; margin-bottom:22px; line-height:1.35;}
+.p-sub{font-size:13.5px; color:#4A6572; text-align:center; margin-bottom:20px; line-height:1.5;}
+
+.p-btn{display:block; width:100%; padding:16px; border-radius:12px; font-size:15.5px; font-weight:600; margin-bottom:12px; transition:all .15s ease; text-align:center;}
+.p-btn-primary{background:#00A885; color:#fff;}
+.p-btn-primary:hover{background:#019674;}
+.p-btn-secondary{background:#F0F9F7; color:#00A885; border:1.5px solid rgba(0,168,133,0.3);}
+.p-btn-secondary:hover{background:#E3F4F0;}
+.p-btn:disabled{opacity:.5; cursor:default;}
+
+.p-input{width:100%; padding:14px 16px; border-radius:12px; border:1.5px solid rgba(0,168,133,0.25); font-size:15px; margin-bottom:14px; outline:none; color:#1A2332; font-family:inherit;}
+.p-input:focus{border-color:#00A885;}
+.p-input::placeholder{color:#9AAEB5;}
+.p-label{font-size:12.5px; color:#4A6572; font-weight:500; margin-bottom:6px; display:block;}
+
+.p-check{width:74px; height:74px; border-radius:50%; background:#E3F8EF; display:flex; align-items:center; justify-content:center; margin:0 auto 18px; font-size:34px; color:#2ECC71; animation:checkPop .4s ease;}
+@keyframes checkPop{0%{transform:scale(0);}70%{transform:scale(1.15);}100%{transform:scale(1);}}
+
+.p-confirm-card{background:#F8FFFE; border:1px solid rgba(0,168,133,.2); border-radius:14px; padding:18px; margin:18px 0;}
+.p-confirm-row{display:flex; justify-content:space-between; padding:7px 0; font-size:13.5px; border-bottom:1px solid rgba(0,168,133,.1);}
+.p-confirm-row:last-child{border-bottom:none;}
+.p-confirm-row .lbl{color:#4A6572;}
+.p-confirm-row .val{font-weight:600; text-align:right;}
+.p-confirm-row .val.mono{font-family:'JetBrains Mono',monospace; font-size:13px;}
+.p-drugname{font-family:'JetBrains Mono',monospace; font-size:19px; font-weight:600; text-align:center; color:#00A885; margin:10px 0 4px;}
+.p-status-pill{display:block; width:fit-content; margin:0 auto 14px; background:#E3F8EF; color:#2ECC71; font-size:12px; font-weight:600; padding:5px 14px; border-radius:20px;}
+
+.p-goodrx{background:#FFF8EC; border:1px solid rgba(243,156,18,.25); border-radius:12px; padding:14px; font-size:13px; color:#7A5400; margin:16px 0; line-height:1.5;}
+
+.p-waiting{text-align:center; padding:30px 0; color:#4A6572; font-size:14.5px; line-height:1.6;}
+.p-spinner{width:34px; height:34px; border-radius:50%; border:3px solid #E3F4F0; border-top-color:#00A885; margin:0 auto 16px; animation:spin 0.9s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
+
+.cross-mode-flash{position:fixed; top:60px; left:50%; transform:translateX(-50%) translateY(-20px); background:var(--red); color:#fff; padding:12px 20px; border-radius:8px; font-size:13px; font-weight:600; z-index:9000; opacity:0; transition:all .3s ease; box-shadow:0 8px 24px rgba(255,92,92,.4); display:flex; align-items:center; gap:8px;}
+.cross-mode-flash.show{opacity:1; transform:translateX(-50%) translateY(0);}
+</style>
+</head>
+<body>
+
+<div class="responsive-warning" id="responsive-warning">
+  Remi is optimized for landscape display — please rotate your device or use a wider window.
+</div>
+
+<div class="key-modal-overlay" id="key-modal-overlay">
+  <div class="key-modal">
+    <h3>Anthropic API Key</h3>
+    <p>Remi calls the Claude API directly from your browser for the command bar and shift reports. Your key is stored only in this browser's localStorage — it is never sent anywhere except api.anthropic.com.</p>
+    <input id="key-input" type="password" placeholder="sk-ant-...">
+    <div class="key-modal-actions">
+      <button class="btn btn-reset" id="key-cancel">Cancel</button>
+      <button class="btn btn-start" id="key-save">Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="app">
+
+  <!-- ===================== TECH MODE ===================== -->
+  <div id="tech-mode">
+    <!-- Persistent left rail — see #sidebar CSS. Hover to expand;
+         click an item to switch `.view`s in the content area. -->
+    <nav id="sidebar">
+      <div class="sidebar-logo"><span class="mark">✚</span><span class="label">Remi</span></div>
+      <div class="sidebar-nav">
+        <div class="sidebar-item active" data-view="dashboard" title="Dashboard"><span class="ic">⚡</span><span class="lbl">Dashboard</span></div>
+        <div class="sidebar-item" data-view="dispensing" title="Dispensing"><span class="ic">💊</span><span class="lbl">Dispensing</span></div>
+        <div class="sidebar-item" data-view="inventory" title="Inventory"><span class="ic">📦</span><span class="lbl">Inventory</span></div>
+        <div class="sidebar-item" data-view="followups" title="Follow-ups"><span class="ic">📞</span><span class="lbl">Follow-ups</span></div>
+        <div class="sidebar-item" data-view="interactions" title="Interactions"><span class="ic">🔍</span><span class="lbl">Interactions</span></div>
+        <div class="sidebar-item" data-view="reports" title="Reports"><span class="ic">📋</span><span class="lbl">Reports</span></div>
+        <div class="sidebar-spacer"></div>
+        <div class="sidebar-item" data-view="settings" title="Settings"><span class="ic">⚙</span><span class="lbl">Settings</span></div>
+      </div>
+    </nav>
+
+    <div class="tech-content">
+    <div class="topbar">
+      <div class="brand">
+        <div class="brand-icon">✚</div>
+        <div class="brand-text">
+          <span class="name">Remi</span>
+          <span class="sub mono">AI PHARMACY AGENT</span>
+        </div>
+      </div>
+
+      <div class="sim-controls">
+        <button class="btn btn-start" id="btn-start">▶ Start Shift</button>
+        <button class="btn btn-pause hidden" id="btn-pause">⏸ Pause</button>
+        <button class="btn btn-reset" id="btn-reset">↺ Reset</button>
+      </div>
+
+      <div class="speed-pills">
+        <button class="speed-pill active" data-speed="1">1×</button>
+        <button class="speed-pill" data-speed="2">2×</button>
+        <button class="speed-pill" data-speed="4">4×</button>
+      </div>
+
+      <div class="shift-clock">
+        <span class="lbl mono">SHIFT TIME</span>
+        <span id="clock-display">09:00</span>
+      </div>
+
+      <div class="spacer"></div>
+
+      <div class="agent-status">
+        <span class="status-dot" id="status-dot"></span>
+        <span id="status-text">Remi idle</span>
+      </div>
+
+      <button class="mode-switch-btn" id="btn-key" title="Set Anthropic API key">🔑 API Key</button>
+      <button class="mode-switch-btn" id="btn-to-patient">Switch to Patient Mode →</button>
+    </div>
+
+    <div class="ekg-strip"><canvas id="ekg-canvas"></canvas></div>
+
+    <div class="view-area">
+      <!-- ===== VIEW: Dashboard (the original single-screen app) ===== -->
+      <div class="view active" id="view-dashboard">
+        <div class="workspace">
+          <!-- LEFT: feed -->
+          <div class="panel" id="feed-panel">
+            <div class="panel-header">Live Shift Feed</div>
+            <div class="panel-scroll" id="feed-scroll"></div>
+          </div>
+
+          <!-- CENTER: reasoning -->
+          <div class="panel" id="reasoning-panel">
+            <div class="panel-header">Remi's Reasoning</div>
+            <div class="panel-scroll" id="reasoning-scroll">
+              <div class="idle-state" id="idle-state">
+                <div class="idle-icon">✚</div>
+                <p>Agent standing by — Start the shift simulation to watch Remi detect issues in real time — without being asked.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- RIGHT: state board -->
+          <div class="panel" id="state-panel">
+            <div class="panel-scroll">
+              <div class="sb-section">
+                <div class="sb-title">Shift Stats</div>
+                <div class="stat-grid">
+                  <div class="stat-card"><div class="stat-num teal" id="stat-scripts">0</div><div class="stat-lbl">Scripts filled</div></div>
+                  <div class="stat-card"><div class="stat-num red" id="stat-flags">0</div><div class="stat-lbl">Agent flags</div></div>
+                  <div class="stat-card"><div class="stat-num amber" id="stat-followups">2</div><div class="stat-lbl">Open follow-ups</div></div>
+                  <div class="stat-card"><div class="stat-num" id="stat-rejects">0</div><div class="stat-lbl">Insurance rejects</div></div>
+                </div>
+              </div>
+
+              <div class="sb-section" id="diversion-section" style="display:none;">
+                <div class="diversion-banner" id="diversion-banner">
+                  <h4>🚨 DIVERSION PATTERN DETECTED</h4>
+                  <div class="dline">Drug: <b id="dv-drug">Oxycodone 5mg</b></div>
+                  <div class="dline">Units unaccounted: <b id="dv-units">–7</b></div>
+                  <div class="dline">Count cycles affected: <b id="dv-cycles">2</b></div>
+                  <div class="dline" style="margin-top:6px;">DEA Form 106 recommended — notify pharmacist immediately.</div>
+                </div>
+              </div>
+
+              <div class="sb-section">
+                <div class="sb-title">Controlled Substances</div>
+                <div id="cs-list"></div>
+              </div>
+
+              <div class="sb-section">
+                <div class="sb-title">Inventory</div>
+                <div id="inv-list"></div>
+              </div>
+
+              <div class="sb-section" style="border-bottom:none;">
+                <div class="sb-title">Follow-ups</div>
+                <div id="fu-list"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="cmdbar">
+          <input id="cmd-input" type="text" placeholder="Ask Remi anything — try: 'Why did you flag oxycodone?' or 'What should I order today?' or 'Generate shift report'">
+          <button class="cmd-send" id="cmd-send">Send</button>
+        </div>
+      </div>
+
+      <!-- ===== VIEW: Dispensing ===== -->
+      <div class="view" id="view-dispensing">
+        <div class="view-header">
+          <h2>💊 Dispensing</h2>
+          <span class="view-sub">Controlled substance log — this shift</span>
+          <div class="view-actions">
+            <button class="btn btn-reset" id="dispensing-export">⬇ Export CSV</button>
+          </div>
+        </div>
+        <div class="view-scroll">
+          <div class="filter-bar">
+            <select id="dispensing-filter-drug"><option value="">All drugs</option></select>
+            <select id="dispensing-filter-status">
+              <option value="">All statuses</option>
+              <option value="reconciled">Reconciled</option>
+              <option value="flagged">Flagged</option>
+            </select>
+          </div>
+          <table class="data-table"><thead><tr>
+            <th>Time</th><th>Drug</th><th>Qty</th><th>Patient</th><th>Tech</th><th>Expected</th><th>Actual</th><th>Delta</th>
+          </tr></thead><tbody id="dispensing-tbody"></tbody></table>
+        </div>
+      </div>
+
+      <!-- ===== VIEW: Inventory ===== -->
+      <div class="view" id="view-inventory">
+        <div class="view-header">
+          <h2>📦 Inventory</h2>
+          <span class="view-sub">Full stock — standard and controlled substances</span>
+        </div>
+        <div class="view-scroll">
+          <table class="data-table inv-grid-table"><thead><tr>
+            <th>Drug</th><th>Current Stock</th><th>Par</th><th>Max</th><th>Status</th><th>Last Updated</th>
+          </tr></thead><tbody id="inventory-tbody"></tbody></table>
+          <div class="sb-section" style="border-bottom:none; margin-top:24px; padding:0;">
+            <div class="sb-title">Reorder List</div>
+            <div id="reorder-list"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== VIEW: Follow-ups ===== -->
+      <div class="view" id="view-followups">
+        <div class="view-header">
+          <h2>📞 Follow-ups</h2>
+          <span class="view-sub">Patient callback &amp; escalation queue</span>
+        </div>
+        <div class="view-scroll">
+          <div class="filter-bar">
+            <select id="followup-filter">
+              <option value="all">All</option>
+              <option value="overdue">Overdue</option>
+              <option value="today">Today</option>
+            </select>
+          </div>
+          <div class="fu-card" style="display:flex; gap:10px; align-items:flex-end;">
+            <div style="flex:1;"><label style="display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;">Patient name</label><input type="text" id="fu-new-name" style="width:100%;height:32px;background:var(--s2);border:1px solid var(--bd1);border-radius:6px;color:var(--tx1);padding:0 8px;"></div>
+            <div style="flex:2;"><label style="display:block;font-size:11px;color:var(--tx2);margin-bottom:4px;">Reason</label><input type="text" id="fu-new-reason" style="width:100%;height:32px;background:var(--s2);border:1px solid var(--bd1);border-radius:6px;color:var(--tx1);padding:0 8px;"></div>
+            <button class="btn btn-start" id="fu-new-add">+ Add</button>
+          </div>
+          <div id="followup-list-full"></div>
+        </div>
+      </div>
+
+      <!-- ===== VIEW: Interactions ===== -->
+      <div class="view" id="view-interactions">
+        <div class="view-header">
+          <h2>🔍 Interactions</h2>
+          <span class="view-sub">Drug interaction checker — OpenFDA + Claude reasoning</span>
+        </div>
+        <div class="view-scroll">
+          <div class="filter-bar">
+            <input type="text" id="interaction-drug-input" placeholder="Add a drug, e.g. oxycodone, then press Enter" style="flex:1; min-width:260px;">
+            <button class="btn btn-start" id="interaction-check-btn">Check Interactions</button>
+          </div>
+          <div id="interaction-chip-list" style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:16px;"></div>
+          <div id="interaction-results"></div>
+        </div>
+      </div>
+
+      <!-- ===== VIEW: Reports ===== -->
+      <div class="view" id="view-reports">
+        <div class="view-header">
+          <h2>📋 Reports</h2>
+          <span class="view-sub">Shift report, discrepancy log, DEA documentation</span>
+          <div class="view-actions">
+            <button class="btn btn-reset" id="reports-print">🖨 Export / Print</button>
+            <button class="btn btn-start" id="reports-audit-package">Generate Audit Package</button>
+          </div>
+        </div>
+        <div class="view-scroll" id="reports-scroll"></div>
+      </div>
+
+      <!-- ===== VIEW: Settings ===== -->
+      <div class="view" id="view-settings">
+        <div class="view-header"><h2>⚙ Settings</h2></div>
+        <div class="view-scroll" id="settings-scroll"></div>
+      </div>
+    </div>
+    </div><!-- /.tech-content -->
+  </div>
+
+  <!-- ===================== PATIENT MODE ===================== -->
+  <div id="patient-mode">
+    <div class="patient-shell">
+      <a class="back-link" id="btn-to-tech">← Back to Tech Mode</a>
+      <div id="patient-step-container"></div>
+    </div>
+  </div>
+
+  <div class="cross-mode-flash" id="cross-mode-flash"></div>
+
+</div>
+
+<script>
+/* ============================================================
+   STATE
+============================================================ */
+const state = {
+  shiftMinutes: 0,
+  running: false,
+  paused: false,
+  speed: 1,
+  inv: { met: 340, ozm: 6, lip: 120, amx: 280 },
+  invStart: { met: 340, ozm: 6, lip: 120, amx: 280 },
+  cs: { oxy: 142, hydro: 88, add: 54, xan: 203 },
+  csStart: { oxy: 142, hydro: 88, add: 54, xan: 203 },
+  oxyExpected: 142,
+  oxyDiscrepancies: [],
+  csLog: [],
+  lastUpdated: {}, // drugKey -> shiftMinutes of last count change, read by the Inventory view's "Last Updated" column
+  scripts: 0,
+  flags: 0,
+  rejects: 0,
+  followups: 2,
+  diversionDetected: false,
+  csFlags: { oxy: 'due', hydro: 'due', add: 'due', xan: 'due' },
+  csCritical: { oxy: false, hydro: false, add: false, xan: false },
+  fired: new Set(),
+  followupList: [
+    { name: 'Mrs. Johnson', reason: 'Ozempic price check', startMin: -52, overdue: true },
+    { name: 'Mr. Rivera', reason: 'Script ready for pickup', startMin: -14, overdue: false }
+  ],
+  pendingTechAlert: null
+};
+
+const drugNames = {
+  met: 'Metformin 500mg', ozm: 'Ozempic 0.5mg', lip: 'Lipitor 20mg', amx: 'Amoxicillin 500mg',
+  oxy: 'Oxycodone 5mg', hydro: 'Hydrocodone 10mg', add: 'Adderall 20mg', xan: 'Xanax 0.5mg'
+};
+const invMax = { met: 400, ozm: 30, lip: 150, amx: 320 };
+
+/* ============================================================
+   SCRIPTED EVENTS
+============================================================ */
+const events = [
+  { at: 5,   type: 'fill', drug: 'met', qty: 60, pt: 'Chen M.' },
+  { at: 12,  type: 'fill', drug: 'lip', qty: 30, pt: 'Williams K.' },
+  { at: 18,  type: 'fill', drug: 'oxy', qty: 20, pt: 'Thompson R.', cs: true },
+  { at: 25,  type: 'reject', drug: 'ozm', code: 75, pt: 'Diaz V.' },
+  { at: 31,  type: 'fill', drug: 'amx', qty: 21, pt: 'Martinez L.' },
+  { at: 38,  type: 'fill', drug: 'oxy', qty: 15, pt: 'Patel S.', cs: true },
+  { at: 45,  type: 'fill', drug: 'xan', qty: 30, pt: 'Brown C.', cs: true },
+  { at: 52,  type: 'fill', drug: 'met', qty: 90, pt: 'Garcia J.' },
+  { at: 58,  type: 'shortage', drug: 'ozm' },
+  { at: 65,  type: 'fill', drug: 'oxy', qty: 20, pt: 'Davis E.', cs: true },
+  { at: 72,  type: 'fill', drug: 'hydro', qty: 30, pt: 'Wilson N.', cs: true },
+  { at: 78,  type: 'fill', drug: 'lip', qty: 30, pt: 'Anderson P.' },
+  { at: 85,  type: 'fill', drug: 'add', qty: 30, pt: 'Taylor B.', cs: true },
+  { at: 88,  type: 'discrepancy', drug: 'oxy', gap: -4, n: 1 },
+  { at: 95,  type: 'fill', drug: 'amx', qty: 28, pt: 'Thomas R.' },
+  { at: 102, type: 'fill', drug: 'ozm', qty: 1, pt: 'Jackson M.', inv: true },
+  { at: 108, type: 'reject', drug: 'add', code: 70, pt: 'Reed T.' },
+  { at: 115, type: 'fill', drug: 'oxy', qty: 20, pt: 'Harris L.', cs: true },
+  { at: 122, type: 'discrepancy', drug: 'oxy', gap: -3, n: 2 },
+  { at: 130, type: 'diversion', drug: 'oxy' }
+];
+
+/* ============================================================
+   DOM REFS
+============================================================ */
+const $ = id => document.getElementById(id);
+const feedScroll = $('feed-scroll');
+const reasoningScroll = $('reasoning-scroll');
+const idleState = $('idle-state');
+
+/* ============================================================
+   CLOCK / TIME HELPERS
+============================================================ */
+
+/**
+ * Converts simulated shift minutes into a 12-hour wall-clock string.
+ *
+ * The shift always starts at 09:00, so `mins` is an offset from that
+ * fixed anchor rather than a real Date — this keeps the simulation
+ * deterministic and trivially resettable (no timezone or Date object
+ * involved anywhere in the sim loop).
+ *
+ * @param {number} mins - Minutes elapsed since shift start (09:00).
+ * @returns {string} Time formatted as "HH:MM AM/PM", e.g. "10:42 AM".
+ *
+ * @example
+ * minutesToTimeStr(90) // "10:30 AM"
+ */
+function minutesToTimeStr(mins){
+  const total = 9*60 + mins;
+  let h = Math.floor(total/60);
+  const m = total%60;
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  let h12 = h % 12; if(h12===0) h12 = 12;
+  return `${String(h12).padStart(2,'0')}:${String(m).padStart(2,'0')} ${ampm}`;
+}
+
+/**
+ * Same conversion as minutesToTimeStr, but compact and lowercase
+ * ("10:30am") for inline use in feed cards and reasoning timestamps
+ * where the full padded format would be too wide.
+ *
+ * @param {number} mins - Minutes elapsed since shift start (09:00).
+ * @returns {string} Time formatted as "H:MMam"/"H:MMpm".
+ */
+function shortTime(mins){
+  const total = 9*60 + mins;
+  let h = Math.floor(total/60);
+  const m = total%60;
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  let h12 = h % 12; if(h12===0) h12 = 12;
+  return `${h12}:${String(m).padStart(2,'0')}${ampm.toLowerCase()}`;
+}
+
+/** Writes the current shift time into the topbar clock display. */
+function updateClock(){ $('clock-display').textContent = minutesToTimeStr(state.shiftMinutes).replace(' ',''); }
+
+/* ============================================================
+   SIM LOOP
+============================================================ */
+let tickHandle = null;
+
+/**
+ * Maps the user-selected speed multiplier to a real-world millisecond
+ * delay between simulated minutes. Kept as a function rather than a
+ * lookup constant because `state.speed` can change mid-shift (the
+ * speed pills are live), so this always reflects the current setting.
+ *
+ * @returns {number} Milliseconds of real time per simulated minute.
+ */
+function tickInterval(){ return state.speed===1?1000: state.speed===2?500:250; }
+
+/**
+ * Starts or resumes the shift simulation clock.
+ * Idempotent: calling it while already running and unpaused is a no-op,
+ * so the Start button can't double-schedule ticks if clicked twice.
+ */
+function startShift(){
+  if(state.running && !state.paused) return;
+  state.running = true; state.paused = false;
+  $('btn-start').classList.add('hidden');
+  $('btn-pause').classList.remove('hidden');
+  $('status-dot').classList.add('live');
+  $('status-text').textContent = 'Remi watching';
+  scheduleTick();
+}
+
+/**
+ * Pauses the shift clock by clearing the pending tick timeout.
+ * In-flight Claude API calls from runAgentTurn() are NOT cancelled —
+ * pausing only stops new shift events from firing, so any reasoning
+ * already streaming into the panel will finish naturally.
+ */
+function pauseShift(){
+  state.paused = true;
+  $('btn-pause').classList.add('hidden');
+  $('btn-start').classList.remove('hidden');
+  $('btn-start').textContent = '▶ Resume';
+  $('status-dot').classList.remove('live');
+  $('status-text').textContent = 'Remi paused';
+  if(tickHandle) clearTimeout(tickHandle);
+}
+
+/**
+ * Resets the entire shift to its starting condition: zeroes the clock,
+ * restores inventory/controlled-substance counts from their `*Start`
+ * snapshots, clears discrepancy/transaction history, and wipes both
+ * the live feed and reasoning panel DOM so a fresh demo run starts clean.
+ */
+function resetShift(){
+  if(tickHandle) clearTimeout(tickHandle);
+  Object.assign(state, {
+    shiftMinutes:0, running:false, paused:false,
+    inv:{...state.invStart}, cs:{...state.csStart},
+    oxyExpected:142, oxyDiscrepancies:[], csLog:[], lastUpdated:{}, scripts:0, flags:0, rejects:0,
+    followups:2, diversionDetected:false,
+    csFlags:{oxy:'due',hydro:'due',add:'due',xan:'due'},
+    csCritical:{oxy:false,hydro:false,add:false,xan:false},
+    fired:new Set()
+  });
+  state.followupList = [
+    { name: 'Mrs. Johnson', reason: 'Ozempic price check', startMin: -52, overdue: true },
+    { name: 'Mr. Rivera', reason: 'Script ready for pickup', startMin: -14, overdue: false }
+  ];
+  feedScroll.innerHTML = '';
+  reasoningScroll.innerHTML = '';
+  reasoningScroll.appendChild(idleState);
+  $('btn-start').textContent = '▶ Start Shift';
+  $('btn-start').classList.remove('hidden');
+  $('btn-pause').classList.add('hidden');
+  $('status-dot').classList.remove('live');
+  $('status-text').textContent = 'Remi idle';
+  $('diversion-section').style.display = 'none';
+  $('diversion-banner').classList.remove('show');
+  updateClock();
+  renderStateBoard();
+}
+/**
+ * Schedules the next advanceMinute() call via setTimeout, using
+ * tickInterval() so the delay always reflects the current speed.
+ * Re-schedules itself after every tick rather than using setInterval
+ * so a paused/reset shift can't leave a stale interval running.
+ */
+function scheduleTick(){
+  if(!state.running || state.paused) return;
+  tickHandle = setTimeout(()=>{
+    advanceMinute();
+    scheduleTick();
+  }, tickInterval());
+}
+
+/**
+ * Advances the simulated shift clock by one minute and fires any
+ * scripted event whose `at` matches the new minute.
+ *
+ * Each event is keyed by `at-type-drug-n` in `state.fired` so that if
+ * advanceMinute somehow runs twice for the same minute (e.g. a speed
+ * change race), the same event can't double-fire and double-count
+ * stats or trigger two simultaneous Claude calls for one event.
+ *
+ * At minute 135 the shift ends: this stops the clock and triggers
+ * generateHandoffReport(), which itself runs through the agentic loop.
+ */
+function advanceMinute(){
+  state.shiftMinutes += 1;
+  updateClock();
+  events.forEach(ev=>{
+    if(ev.at === state.shiftMinutes && !state.fired.has(ev.at+'-'+ev.type+'-'+ev.drug+(ev.n||''))){
+      state.fired.add(ev.at+'-'+ev.type+'-'+ev.drug+(ev.n||''));
+      handleEvent(ev);
+    }
+  });
+  if(state.shiftMinutes >= 135 && !state.fired.has('shift-end')){
+    state.fired.add('shift-end');
+    generateHandoffReport();
+    state.running = false;
+    if(tickHandle) clearTimeout(tickHandle);
+    $('btn-pause').classList.add('hidden');
+    $('btn-start').classList.add('hidden');
+    $('status-dot').classList.remove('live');
+    $('status-text').textContent = 'Shift complete';
+  }
+  renderStateBoard();
+}
+
+/* ============================================================
+   EVENT HANDLING
+   These handlers update `state` and the live feed for a scripted
+   shift event, then — for anything that actually needs a judgment
+   call — hand off to runAgentTurn() so Claude decides what happens
+   next. They are intentionally thin: the decision-making logic lives
+   in the agentic loop below, not here.
+============================================================ */
+
+/**
+ * Routes a scripted shift event to its type-specific handler.
+ * Also pulses the EKG strip so every event has a visible heartbeat,
+ * independent of whether Claude ends up being called for it.
+ *
+ * @param {object} ev - One entry from the `events` timeline array.
+ */
+function handleEvent(ev){
+  pulseEkg();
+  if(ev.type === 'fill') handleFill(ev);
+  else if(ev.type === 'reject') handleReject(ev);
+  else if(ev.type === 'shortage') handleShortage(ev);
+  else if(ev.type === 'discrepancy') handleDiscrepancy(ev);
+  else if(ev.type === 'diversion') handleDiversion(ev);
+}
+
+/**
+ * Appends a card to the left-hand Live Shift Feed panel.
+ * This is pure event logging (what happened) and is deliberately kept
+ * separate from the Reasoning Panel (what Claude decided to do about
+ * it) — the two panels can update on different timelines since the
+ * feed card appears instantly but agent reasoning streams in over
+ * the following seconds.
+ *
+ * @param {string} type - One of 'fill' | 'reject' | 'discrepancy' | 'shortage' | 'diversion'.
+ * @param {string} drugKey - Short drug key, e.g. 'oxy'. Looked up in `drugNames`.
+ * @param {string} detail - Pre-formatted HTML snippet shown under the drug name.
+ */
+function pushFeedCard(type, drugKey, detail){
+  const card = document.createElement('div');
+  card.className = `feed-card t-${type}`;
+  const badgeText = {
+    fill: 'FILL', reject: 'INS REJECT', discrepancy: 'DISCREPANCY',
+    shortage: 'SHORTAGE', diversion: '⚠ DIVERSION'
+  }[type];
+  card.innerHTML = `
+    <span class="feed-badge t-${type}">${badgeText}</span>
+    <div class="feed-drug">${drugNames[drugKey]}</div>
+    <div class="feed-detail">${detail}</div>
+    <div class="feed-time mono">${shortTime(state.shiftMinutes)}</div>
+  `;
+  feedScroll.appendChild(card);
+  feedScroll.scrollTop = feedScroll.scrollHeight;
+}
+
+/**
+ * Returns what the controlled-substance count *should* be for a drug
+ * right now, given fills logged so far.
+ *
+ * Only oxycodone has a separately tracked expected count
+ * (`state.oxyExpected`) because it's the only drug the scripted
+ * timeline ever introduces a discrepancy for — every other CS drug's
+ * fills always decrement `state.cs` directly with no injected gap, so
+ * for those, "expected" and "actual" are the same number by
+ * construction. This indirection exists so trace_discrepancy() and
+ * check_inventory() can ask "is this drug reconciled?" generically,
+ * without every caller needing to know that asymmetry.
+ *
+ * @param {string} key - Short drug key, e.g. 'oxy', 'hydro'.
+ * @returns {number} Expected on-hand count for that controlled substance.
+ */
+function expectedCount(key){ return key === 'oxy' ? state.oxyExpected : state.cs[key]; }
+
+/**
+ * Handles a routine prescription fill — the only event type that
+ * does NOT automatically get an agent turn, because a normal fill is
+ * not a decision point. We still log every controlled-substance fill
+ * to `state.csLog` (the transaction ledger trace_discrepancy() reads
+ * later) even though nothing here judges it, so that if a discrepancy
+ * shows up several events later, Claude can reconstruct the full
+ * fill-by-fill history rather than just seeing a final mismatched count.
+ *
+ * The one exception: if this fill drops Ozempic to a critical level,
+ * that crosses from "routine" to "needs a decision," so it's escalated
+ * to runAgentTurn() with check_inventory() available as a tool.
+ *
+ * @param {object} ev - Fill event: { drug, qty, pt, cs?, inv? }.
+ */
+function handleFill(ev){
+  state.scripts++;
+  flashStat('stat-scripts');
+  if(ev.cs){
+    state.cs[ev.drug] -= ev.qty;
+    if(ev.drug === 'oxy') state.oxyExpected -= ev.qty;
+    state.csLog.push({ drug: ev.drug, pt: ev.pt, qty: ev.qty, atMin: state.shiftMinutes, runningCount: state.cs[ev.drug] });
+    state.lastUpdated[ev.drug] = state.shiftMinutes;
+    pushFeedCard('fill', ev.drug, `${ev.qty}ct &middot; Pt: ${ev.pt}`);
+    if(expectedCount(ev.drug) === state.cs[ev.drug] && state.csFlags[ev.drug] !== 'flag'){
+      state.csFlags[ev.drug] = 'ok';
+    }
+  } else if(ev.inv){
+    state.inv.ozm -= ev.qty;
+    state.lastUpdated.ozm = state.shiftMinutes;
+    pushFeedCard('fill', ev.drug, `1 pen &middot; Pt: ${ev.pt}`);
+  } else {
+    state.inv[ev.drug] -= ev.qty;
+    state.lastUpdated[ev.drug] = state.shiftMinutes;
+    pushFeedCard('fill', ev.drug, `${ev.qty}ct &middot; Pt: ${ev.pt}`);
+  }
+  if(ev.drug === 'ozm' && state.inv.ozm <= 3){
+    state.flags++; flashStat('stat-flags');
+    runAgentTurn({
+      icon:'⚠', trigger:`Ozempic stock critical`,
+      userPrompt:`Ozempic 0.5mg stock just crossed a low threshold after a fill.\n\nCurrent shift state:\n${JSON.stringify(pharmacyStateSnapshot(),null,2)}\n\nCheck the inventory and tell the tech what to do.`
+    });
+  }
+}
+
+/**
+ * Handles an insurance claim rejection at the counter.
+ *
+ * Deliberately does NOT branch on `ev.code` here — that branching used
+ * to live in this function as hardcoded reasoning text per code. It's
+ * been removed: the decode_reject tool (and the small REJECT_CODES
+ * lookup behind it) now holds that knowledge, and Claude decides
+ * whether and how to call it. This function's only job is to update
+ * the counters/feed and start the agent turn with the raw event facts.
+ *
+ * @param {object} ev - Reject event: { drug, code, pt }.
+ */
+function handleReject(ev){
+  state.rejects++;
+  flashStat('stat-rejects');
+  state.flags++; flashStat('stat-flags');
+  pushFeedCard('reject', ev.drug, `Code ${ev.code} &middot; Pt: ${ev.pt}`);
+  runAgentTurn({
+    icon:'⚠', trigger:`Insurance reject — ${drugNames[ev.drug]} (code ${ev.code})`,
+    userPrompt:`An insurance claim just rejected at the counter.\n\nEvent: ${drugNames[ev.drug]} for patient ${ev.pt}, NCPDP reject code ${ev.code}.\n\nCurrent shift state:\n${JSON.stringify(pharmacyStateSnapshot(),null,2)}\n\nFigure out what this means and tell the tech what to do right now.`
+  });
+}
+
+/**
+ * Handles an FDA drug-shortage-list update for a drug.
+ * Currently only ever fires for Ozempic in the scripted timeline, but
+ * is written generically (keyed off `ev.drug`) rather than hardcoded
+ * to Ozempic, so adding another shortage event later doesn't require
+ * touching this function — only the `events` array and check_inventory's
+ * `fda_shortage_active` flag.
+ *
+ * @param {object} ev - Shortage event: { drug }.
+ */
+function handleShortage(ev){
+  state.flags++; flashStat('stat-flags');
+  pushFeedCard('shortage', ev.drug, `FDA shortage &middot; allocation -40%`);
+  runAgentTurn({
+    icon:'⚠', trigger:`FDA shortage list updated — ${drugNames[ev.drug]}`,
+    userPrompt:`The FDA drug shortage list was just updated.\n\nEvent: ${drugNames[ev.drug]} wholesaler allocation reduced 40%.\n\nCurrent shift state:\n${JSON.stringify(pharmacyStateSnapshot(),null,2)}\n\nAssess the impact and tell the tech what to do.`
+  });
+}
+
+/**
+ * Handles a controlled-substance count discrepancy (a gap between
+ * expected and actual count for oxycodone).
+ *
+ * We record the discrepancy into `state.oxyDiscrepancies` BEFORE
+ * calling the agent, not after, because trace_discrepancy() and
+ * generate_form106() both read that array — if Claude calls either
+ * tool mid-turn for this event, it needs to see the discrepancy that
+ * just happened, including this one, not just prior ones.
+ *
+ * Note this function no longer decides whether the discrepancy is
+ * "explainable" or whether it's the second occurrence forming a
+ * pattern — that judgment now belongs entirely to Claude, working
+ * from the discrepancy history embedded in pharmacyStateSnapshot().
+ *
+ * @param {object} ev - Discrepancy event: { gap, n } where n is the count-cycle number this shift.
+ */
+function handleDiscrepancy(ev){
+  state.flags++; flashStat('stat-flags');
+  const gap = ev.gap;
+  state.cs.oxy += gap;
+  state.oxyDiscrepancies.push({ gap, at: state.shiftMinutes, n: ev.n });
+  state.csFlags.oxy = 'flag';
+  pushFeedCard('discrepancy', 'oxy', `Gap ${gap} units &middot; count cycle ${ev.n}`);
+
+  runAgentTurn({
+    icon:'🔍', trigger:`Controlled substance count discrepancy — ${drugNames.oxy}`,
+    userPrompt:`A controlled substance count discrepancy was just found.\n\nEvent: count cycle #${ev.n} for ${drugNames.oxy} — gap of ${gap} units.\n\nCurrent shift state:\n${JSON.stringify(pharmacyStateSnapshot(),null,2)}\n\nInvestigate this discrepancy and tell the tech what to do. If it's part of a pattern across multiple count cycles this shift, say so explicitly.`
+  });
+}
+
+/**
+ * Handles the scripted "diversion reveal" event — the plot point where
+ * the timeline declares that two prior discrepancies on the same
+ * Schedule II drug now constitute a pattern.
+ *
+ * Important distinction: the FACT that this is a diversion-pattern
+ * moment is scripted (it's a fixed beat in the demo timeline, not
+ * something Claude detects on its own from raw events). What IS real
+ * is everything downstream of that fact — Claude independently
+ * investigates the history via trace_discrepancy(), decides whether
+ * to draft DEA paperwork via generate_form106(), and decides whether
+ * to escalate via flag_pharmacist(). The diversion banner UI toggle
+ * below is display logic only; it carries no reasoning.
+ *
+ * @param {object} ev - Diversion event: { drug }.
+ */
+function handleDiversion(ev){
+  state.diversionDetected = true;
+  state.flags++; flashStat('stat-flags');
+  state.csFlags.oxy = 'flag';
+  state.csCritical.oxy = true;
+  pushFeedCard('diversion', 'oxy', `Pattern confirmed &middot; –7 units across 2 count cycles`);
+
+  $('diversion-section').style.display = 'block';
+  $('dv-units').textContent = '–7';
+  $('dv-cycles').textContent = '2';
+  requestAnimationFrame(()=>$('diversion-banner').classList.add('show'));
+
+  runAgentTurn({
+    icon:'🚨', trigger:`Diversion pattern analysis — ${drugNames.oxy}`,
+    userPrompt:`Multiple unexplained controlled substance discrepancies have now occurred on the same Schedule II drug this shift.\n\nCurrent shift state:\n${JSON.stringify(pharmacyStateSnapshot(),null,2)}\n\nInvestigate fully. If the pattern is consistent with diversion, generate DEA Form 106 documentation and escalate to the pharmacist.`,
+    slow:true
+  });
+}
+
+/**
+ * Triggered once, at minute 135, when the simulated shift ends.
+ * Rather than assembling the handoff report from hardcoded template
+ * strings (the original implementation), this now runs through the
+ * same agentic loop as every other event — Claude is given the full
+ * state snapshot and is free to call check_inventory() or
+ * trace_discrepancy() again before writing the handoff conclusion,
+ * so the report reflects an actual review rather than a canned summary.
+ */
+function generateHandoffReport(){
+  runAgentTurn({
+    icon:'📋', trigger:'Shift complete — handoff report',
+    userPrompt:`The shift just ended.\n\nCurrent shift state:\n${JSON.stringify(pharmacyStateSnapshot(),null,2)}\n\nWrite the handoff report for the incoming tech. Investigate anything still open (discrepancies, inventory, follow-ups) before concluding, and call out the single most important thing the next tech needs to know first.`
+  });
+}
+
+/* ============================================================
+   AGENTIC TOOL-USE ENGINE
+   Every shift event below is handed to Claude with a set of
+   tools. Claude decides what to investigate and what to do —
+   trace_discrepancy / check_inventory / decode_reject / etc.
+   are tool implementations Claude calls, not decision-makers.
+
+   Flow, top to bottom in this file:
+     TOOLS         — JSON schema sent to the Claude API describing
+                     each callable tool (name, description, input shape).
+     TOOL_IMPL     — the real JS functions, one per tool name, that
+                     execute against `state` when Claude calls a tool.
+     streamClaudeTurn() — makes ONE streamed call to /v1/messages and
+                     renders text as it arrives; returns what Claude
+                     said and which tool(s), if any, it chose to call.
+     runAgentTurn()     — the orchestration loop: calls streamClaudeTurn()
+                     repeatedly, executing tools and feeding results
+                     back, until Claude responds with no tool calls
+                     (its final conclusion).
+============================================================ */
+
+/**
+ * Tool schema handed to the Claude API on every request (the `tools`
+ * field). This is the ONLY place that defines what Claude is allowed
+ * to do — Claude reads these `description` strings to decide which
+ * tool fits a given event, so the descriptions are written for the
+ * model's benefit, not just as documentation. The `drug` parameter is
+ * constrained with `enum: Object.keys(drugNames)` rather than a free
+ * string so Claude can't pass a typo'd or natural-language drug name
+ * that TOOL_IMPL wouldn't recognize.
+ */
+const TOOLS = [
+  {
+    name: 'trace_discrepancy',
+    description: 'Reconstructs the controlled substance transaction ledger for a drug to find where a count discrepancy may have occurred. Returns opening count, expected vs actual count, the fill-by-fill ledger, and discrepancy history.',
+    input_schema: { type:'object', properties:{ drug:{ type:'string', enum:Object.keys(drugNames), description:'Short drug key' } }, required:['drug'] }
+  },
+  {
+    name: 'check_inventory',
+    description: 'Reads current stock level for a drug and returns stock analysis (on hand, max stock, percent of max, shortage status).',
+    input_schema: { type:'object', properties:{ drug:{ type:'string', enum:Object.keys(drugNames), description:'Short drug key' } }, required:['drug'] }
+  },
+  {
+    name: 'decode_reject',
+    description: 'Decodes an NCPDP insurance rejection code and returns the likely cause and recommended fix.',
+    input_schema: { type:'object', properties:{ code:{ type:'integer', description:'NCPDP reject code' }, drug:{ type:'string', enum:Object.keys(drugNames) } }, required:['code','drug'] }
+  },
+  {
+    name: 'flag_pharmacist',
+    description: 'Escalates an issue to the pharmacist follow-up queue so it is not lost.',
+    input_schema: { type:'object', properties:{ reason:{ type:'string' }, severity:{ type:'string', enum:['low','medium','high','critical'] } }, required:['reason','severity'] }
+  },
+  {
+    name: 'generate_form106',
+    description: 'Drafts DEA Form 106 (Report of Theft or Loss of Controlled Substances) language from a drug\'s discrepancy history.',
+    input_schema: { type:'object', properties:{ drug:{ type:'string', enum:Object.keys(drugNames) } }, required:['drug'] }
+  }
+];
+
+/**
+ * Lookup table behind the decode_reject tool. Only NCPDP reject codes
+ * that actually appear in this app's scripted timeline (70, 75) plus
+ * two common real-world codes (76, 88) are included — see
+ * docs/DOMAIN.md for what each code means and why these were chosen.
+ * Anything not in this table still returns a safe, generic answer
+ * rather than throwing, since Claude is free to pass any code value.
+ */
+const REJECT_CODES = {
+  70: { meaning:'Product/service not covered — DAW code mismatch', fix:'Rebill as DAW-0 (pharmacist-selected generic) or contact the prescriber for a DAW-1 brand-necessary override.' },
+  75: { meaning:'Refill too soon', fix:'Request a vacation override from the PBM or initiate a prior authorization. Offer the GoodRx cash price while the patient waits.' },
+  76: { meaning:'Plan limitations exceeded', fix:'Check the fill quantity against plan limits — a quantity-limit override or PA may be required.' },
+  88: { meaning:'DUR reject — drug utilization review conflict', fix:'Review for interaction or duplication; a pharmacist DUR override (level-of-effort code) may be required.' }
+};
+
+/**
+ * Real implementations behind the five tools in TOOLS, keyed by tool
+ * name so runAgentTurn() can dispatch a Claude tool_use block straight
+ * to `TOOL_IMPL[name](input)`. Every one of these reads (and two of
+ * them write) the single global `state` object — this is the only
+ * place in the file where Claude's decisions actually touch app state.
+ * Each function takes the destructured `input` object Claude supplied
+ * for that tool call and returns a plain JSON-serializable object,
+ * which runAgentTurn() sends back to Claude as a `tool_result`.
+ */
+const TOOL_IMPL = {
+  /**
+   * Reconstructs the count history for a controlled substance so
+   * Claude can reason about where a gap came from, rather than just
+   * being told "there's a gap."
+   * @param {{drug:string}} input - Short drug key, e.g. 'oxy'.
+   * @returns {object} Opening/expected/actual counts, the discrepancy
+   *   history, and the fill-by-fill transaction ledger for that drug.
+   */
+  trace_discrepancy({drug}){
+    return {
+      drug: drugNames[drug] || drug,
+      opening_count: state.csStart[drug],
+      expected_count_now: expectedCount(drug),
+      actual_count_now: state.cs[drug],
+      gap: state.cs[drug] - expectedCount(drug),
+      // Only oxycodone ever has discrepancy events in this scripted
+      // timeline; other CS drugs always reconcile, so their history is empty.
+      discrepancy_history: drug === 'oxy' ? state.oxyDiscrepancies.map(d=>({ gap:d.gap, count_cycle:d.n, at: shortTime(d.at) })) : [],
+      transaction_ledger: state.csLog.filter(e=>e.drug===drug).map(e=>({ time: shortTime(e.atMin), patient: e.pt, dispensed: e.qty, running_count_after: e.runningCount }))
+    };
+  },
+  /**
+   * Reads current stock for any drug — controlled substance or
+   * standard inventory — and shapes the response differently for
+   * each, since "expected count" only means something for CS drugs
+   * while "percent of max stock" only means something for standard
+   * inventory tracked against `invMax`.
+   * @param {{drug:string}} input - Short drug key.
+   * @returns {object} Stock level plus the relevant analysis fields for that drug's category.
+   */
+  check_inventory({drug}){
+    if(drug in state.cs){
+      return { drug: drugNames[drug], type:'controlled_substance', on_hand: state.cs[drug], expected: expectedCount(drug), status: state.csFlags[drug] };
+    }
+    return { drug: drugNames[drug], type:'standard_inventory', on_hand: state.inv[drug], max_stock: invMax[drug] || null, pct_of_max: invMax[drug] ? Math.round(100*state.inv[drug]/invMax[drug]) : null, fda_shortage_active: drug === 'ozm' };
+  },
+  /**
+   * Looks up an NCPDP reject code's meaning and fix.
+   * Read-only and side-effect-free — kept that way deliberately so
+   * Claude can call it speculatively without changing app state.
+   * @param {{code:number, drug:string}} input
+   * @returns {object} The code, drug name, plain-English meaning, and recommended fix.
+   */
+  decode_reject({code, drug}){
+    const entry = REJECT_CODES[code] || { meaning:'Unrecognized NCPDP reject code', fix:'Escalate to pharmacist for manual review.' };
+    return { code, drug: drugNames[drug] || drug, ...entry };
+  },
+  /**
+   * The one tool that writes UI-visible state: pushes an item onto
+   * the pharmacist follow-up queue and re-renders the state board
+   * immediately, so escalations Claude makes mid-reasoning are visible
+   * on screen before the reasoning panel even finishes streaming.
+   * @param {{reason:string, severity:'low'|'medium'|'high'|'critical'}} input
+   * @returns {object} Confirmation of the queued item and when it was queued.
+   */
+  flag_pharmacist({reason, severity}){
+    state.followupList.unshift({ name:'Pharmacist queue', reason, startMin: state.shiftMinutes, overdue: severity === 'critical' || severity === 'high' });
+    state.followups++;
+    renderStateBoard();
+    return { status:'queued', severity, queued_at: shortTime(state.shiftMinutes) };
+  },
+  /**
+   * Drafts DEA Form 106 narrative language from a drug's discrepancy
+   * history. Returns a recommendation (`form_106_recommended`) rather
+   * than deciding outright — Claude still has to read this and choose
+   * whether to act on it and how to phrase the conclusion to the tech.
+   * @param {{drug:string}} input
+   * @returns {object} Discrepancy totals, a recommendation flag, and draft narrative text.
+   */
+  generate_form106({drug}){
+    const history = drug === 'oxy' ? state.oxyDiscrepancies : [];
+    const totalGap = history.reduce((sum,d)=>sum+Math.abs(d.gap),0);
+    return {
+      drug: drugNames[drug] || drug,
+      discrepancy_count: history.length,
+      total_unaccounted_units: totalGap,
+      form_106_recommended: history.length >= 2,
+      draft_narrative: `Theft/Loss of Controlled Substances — ${drugNames[drug]||drug}. ${history.length} unexplained count discrepancies this shift totaling ${totalGap} units unaccounted for. Pattern consistent with diversion. File DEA Form 106 with the DEA Diversion Control Division and notify the pharmacist-in-charge and DEA registrant immediately.`
+    };
+  }
+};
+
+/**
+ * Builds the JSON context object embedded into every agent prompt.
+ * This is the entire window Claude has into the pharmacy at decision
+ * time — anything not included here, Claude can only learn about by
+ * calling a tool. Keeping this snapshot intentionally lean (summary
+ * counts and statuses, not full transaction logs) is what makes tool
+ * use necessary rather than decorative: if the full ledger were dumped
+ * in up front, Claude would have no reason to call trace_discrepancy().
+ *
+ * @returns {object} Shift time, scripts filled, rejects, CS counts/status, discrepancy history, inventory, and open follow-ups.
+ */
+function pharmacyStateSnapshot(){
+  const snapshot = {
+    shift_time: minutesToTimeStr(state.shiftMinutes),
+    scripts_filled: state.scripts,
+    open_insurance_rejects: state.rejects,
+    diversion_detected: state.diversionDetected,
+    controlled_substances: Object.keys(state.cs).map(k=>({ key:k, drug: drugNames[k], on_hand: state.cs[k], expected: expectedCount(k), status: state.csFlags[k] })),
+    oxycodone_discrepancy_history: state.oxyDiscrepancies.map(d=>({ gap:d.gap, count_cycle:d.n, at: shortTime(d.at) })),
+    inventory: Object.keys(state.inv).map(k=>({ key:k, drug: drugNames[k], on_hand: state.inv[k], max: invMax[k] || null })),
+    open_followups: state.followupList.map(f=>({ name:f.name, reason:f.reason, overdue:f.overdue }))
+  };
+  console.log('[Remi] State snapshot:', snapshot);
+  return snapshot;
+}
+
+/**
+ * System prompt for every agent turn (distinct from buildSystemPrompt()
+ * below, which is the simpler single-turn prompt for the command bar).
+ *
+ * The five numbered rules exist to make Claude's output renderable:
+ * rule 1 ("> " prefixed lines before any tool call) is what lets
+ * streamClaudeTurn() tell apart "Claude thinking out loud" from
+ * "Claude's final answer" — the renderer doesn't parse intent, it just
+ * trusts that text preceding a tool_use block is commentary and text
+ * with no following tool_use is the conclusion. If this prompt ever
+ * changes, the rendering logic in runAgentTurn() (which strips the
+ * intermediate lines and keeps only the final block as the styled
+ * conclusion) should be re-checked against it.
+ *
+ * @returns {string} The system prompt sent with every /v1/messages call from runAgentTurn().
+ */
+function buildAgentSystemPrompt(){
+  return `You are Remi, an autonomous AI agent embedded at a retail pharmacy counter. You watch shift events in real time and decide, on your own, what to investigate and what to do about them. You have tools — use whichever ones genuinely help you investigate this specific event. Don't call a tool that isn't relevant, and don't skip one that is.
+
+How to respond, every time:
+1. Before any tool call, write 1-3 short lines, each starting with "> ", explaining what you're about to check and why. Terse, terminal-style. No filler.
+2. Call whichever tool(s) actually help. You may call more than one in sequence, or skip tools entirely if the event is simple enough to reason about directly from the state you were given.
+3. Once you have what you need, write a final conclusion: 1-3 sentences, no "> " prefix, telling the tech exactly what to do right now.
+4. Never make clinical judgments. Always recommend pharmacist review for anything touching patient safety or controlled substances.
+5. Be direct. The tech reading this is mid-shift and busy.`;
+}
+
+/**
+ * Picks a severity color (red/amber/teal) for the final conclusion
+ * bubble based on keywords in Claude's own conclusion text.
+ *
+ * This is a heuristic, not a field Claude returns — we don't ask
+ * Claude to also emit a structured severity enum because that would
+ * mean validating a second output against the free-text conclusion
+ * (and handling the case where they disagree). Scanning Claude's own
+ * words for "CRITICAL"/"ESCALATE"/etc. is simpler and self-consistent:
+ * the color always matches what the tech actually reads.
+ *
+ * @param {string} text - Claude's final conclusion text.
+ * @returns {'red'|'amber'|'teal'} CSS class suffix for `.r-conclusion`.
+ */
+function conclusionColorFor(text){
+  const t = text.toUpperCase();
+  if(t.includes('CRITICAL') || t.includes('DIVERSION') || t.includes('FORM 106') || t.includes('DEA ')) return 'red';
+  if(t.includes('ESCALATE') || t.includes('NOTIFY') || t.includes('⚠')) return 'amber';
+  return 'teal';
+}
+
+/**
+ * Renders a single "⚙ calling toolName({...})" line in the reasoning
+ * panel so the tech can see exactly which tool Claude invoked and
+ * with what arguments — this is the one place raw tool_use data is
+ * shown verbatim; tool *results* are deliberately not rendered (they
+ * go back to Claude as JSON, but only Claude's own follow-up text
+ * about them reaches the screen) to keep the panel readable.
+ *
+ * @param {HTMLElement} body - The `.r-body` container for the current agent turn's block.
+ * @param {string} name - Tool name, e.g. 'trace_discrepancy'.
+ * @param {object} input - The arguments Claude supplied for this call.
+ */
+function renderToolCallLine(body, name, input){
+  const el = document.createElement('div');
+  el.className = 'r-line tool';
+  el.textContent = `⚙ calling ${name}(${JSON.stringify(input)})`;
+  body.appendChild(el);
+  reasoningScroll.scrollTop = reasoningScroll.scrollHeight;
+}
+
+/**
+ * Makes one streamed call to the Claude Messages API and renders any
+ * text content live into the DOM as it arrives, token by token.
+ *
+ * Why streaming + manual SSE parsing instead of a plain JSON request:
+ * a non-streamed call would only let us render Claude's reasoning
+ * after the ENTIRE response (including any tool calls) finished —
+ * the panel would just freeze and then dump a full block of text.
+ * Streaming lets the tech watch Claude "think" in real time, which is
+ * the whole point of the reasoning panel. The tradeoff is that we
+ * have to reconstruct tool_use blocks ourselves from incremental
+ * `input_json_delta` fragments instead of getting one parsed object.
+ *
+ * One call here is ONE turn of the conversation — if Claude's response
+ * includes a tool_use block, the caller (runAgentTurn) is responsible
+ * for executing it and calling this function again with the tool
+ * result appended. This function does not loop on its own.
+ *
+ * @param {Array<object>} messages - Full Anthropic messages array for this conversation so far (user/assistant turns, including prior tool_use/tool_result blocks).
+ * @param {HTMLElement} body - The `.r-body` container to stream text lines into as they arrive.
+ * @returns {Promise<{textBlocks:string[], toolUses:Array<{id:string,name:string,input:object}>, stopReason:string|null, lineEls:HTMLElement[]}>}
+ *   textBlocks: each non-empty text block Claude produced this turn, in order.
+ *   toolUses: every tool Claude decided to call this turn, with its parsed input.
+ *   lineEls: the DOM elements created for each text block, so the caller can
+ *            either leave them in place (intermediate reasoning) or remove them
+ *            and substitute a styled conclusion bubble (final turn).
+ */
+async function streamClaudeTurn(messages, body){
+  const apiKey = getApiKey();
+  const requestBody = {
+    model: 'claude-sonnet-4-6',
+    max_tokens: 1024,
+    system: buildAgentSystemPrompt(),
+    tools: TOOLS,
+    messages,
+    stream: true
+  };
+  console.log('[Remi] Claude API request:', requestBody);
+
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      // Required to call the Messages API directly from a browser at all —
+      // without it the API rejects the request before CORS even applies.
+      'anthropic-dangerous-direct-browser-access': 'true'
+    },
+    body: JSON.stringify(requestBody)
+  });
+
+  if(!resp.ok){
+    let errBody = {};
+    try{ errBody = await resp.json(); } catch{}
+    console.log('[Remi] Claude API error response:', errBody);
+    // An expired/invalid key surfaces here as 401 — re-open the modal
+    // immediately rather than letting the tech read a raw error string.
+    if(errBody?.error?.type === 'authentication_error') openKeyModal();
+    throw new Error(errBody?.error?.message || `HTTP ${resp.status}`);
+  }
+
+  // ── SSE STREAM PARSING ──────────────────────────────────────
+  // The Messages API streams Server-Sent Events: each line is either
+  // blank or "data: {...}". A response can contain multiple content
+  // blocks (e.g. a text block, THEN a tool_use block) — `blocks` is
+  // keyed by the block's index so deltas for block 0 and block 1 don't
+  // get interleaved into the same buffer.
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  const blocks = {};
+  let stopReason = null;
+
+  while(true){
+    const { done, value } = await reader.read();
+    if(done) break;
+    // SSE frames can be split across chunk boundaries, so we only
+    // consume complete lines and carry any trailing partial line in `buf`.
+    buf += decoder.decode(value, { stream:true });
+    const parts = buf.split('\n');
+    buf = parts.pop();
+    for(const line of parts){
+      if(!line.startsWith('data:')) continue;
+      const raw = line.slice(5).trim();
+      if(!raw) continue;
+      let evt;
+      try{ evt = JSON.parse(raw); } catch{ continue; }
+
+      if(evt.type === 'content_block_start'){
+        // A new content block (text or tool_use) is beginning at this index.
+        const b = { type: evt.content_block.type, text:'', jsonStr:'', id: evt.content_block.id, name: evt.content_block.name, el:null };
+        blocks[evt.index] = b;
+        if(b.type === 'text'){
+          // Create the DOM line now, before any text has arrived, so the
+          // reasoning panel shows an appearing line immediately rather
+          // than waiting for the first delta — matches how the tech
+          // would expect a live "typing" effect to start.
+          b.el = document.createElement('div');
+          b.el.className = 'r-line step';
+          body.appendChild(b.el);
+        }
+      } else if(evt.type === 'content_block_delta'){
+        const b = blocks[evt.index];
+        if(!b) continue;
+        if(evt.delta.type === 'text_delta'){
+          // Token-by-token text growth — this is what makes the line
+          // visually "stream" rather than pop in all at once.
+          b.text += evt.delta.text;
+          if(b.el){ b.el.textContent = b.text; reasoningScroll.scrollTop = reasoningScroll.scrollHeight; }
+        } else if(evt.delta.type === 'input_json_delta'){
+          // Tool call arguments arrive as fragments of a JSON string,
+          // not as a parsed object — buffered here and JSON.parse'd
+          // only once the block is complete, below.
+          b.jsonStr += evt.delta.partial_json;
+        }
+      } else if(evt.type === 'message_delta'){
+        if(evt.delta && evt.delta.stop_reason) stopReason = evt.delta.stop_reason;
+      }
+    }
+  }
+
+  // ── ASSEMBLE FINAL RESULT FROM ACCUMULATED BLOCKS ───────────
+  // Iterate by numeric index (not object key order) so multi-block
+  // responses are reassembled in the order Claude actually emitted them.
+  const textBlocks = [];
+  const toolUses = [];
+  const lineEls = [];
+  Object.keys(blocks).map(Number).sort((a,b)=>a-b).forEach(i=>{
+    const b = blocks[i];
+    if(b.type === 'text'){
+      // A text block with no real content (Claude sometimes opens an
+      // empty block immediately before a tool_use) would otherwise
+      // leave a blank, animated-in line with nothing in it — drop it.
+      if(b.text.trim()){ textBlocks.push(b.text); lineEls.push(b.el); }
+      else if(b.el){ b.el.remove(); }
+    } else if(b.type === 'tool_use'){
+      let input = {};
+      try{ input = b.jsonStr ? JSON.parse(b.jsonStr) : {}; } catch{}
+      toolUses.push({ id: b.id, name: b.name, input });
+    }
+  });
+  console.log('[Remi] Claude turn complete — text blocks:', textBlocks, 'tool calls:', toolUses, 'stop reason:', stopReason);
+  return { textBlocks, toolUses, stopReason, lineEls };
+}
+
+/**
+ * The agentic loop. One call = one shift event fully reasoned about,
+ * start to finish, possibly spanning several round trips to Claude.
+ *
+ * @param {object} args
+ * @param {string} args.icon - Emoji shown in the reasoning block header.
+ * @param {string} args.trigger - Human-readable description of what triggered this turn (shown in the header).
+ * @param {string} args.userPrompt - The event description + JSON state snapshot, sent as the first user message.
+ * @returns {Promise<void>} Resolves once Claude has produced a final conclusion (or an error has been rendered in its place). Nothing is returned — all output is side-effected into the reasoning panel DOM.
+ */
+async function runAgentTurn({icon, trigger, userPrompt}){
+  console.log('[Remi] Event fired:', trigger);
+  if(idleState.parentNode) idleState.remove();
+  const apiKey = getApiKey();
+
+  // Step 1: Create the reasoning-panel block shell for this event.
+  // The state snapshot itself was already built by the caller and is
+  // embedded inside `userPrompt` — see pharmacyStateSnapshot().
+  const block = document.createElement('div');
+  block.className = 'r-block';
+  block.innerHTML = `
+    <div class="r-header">
+      <span class="r-icon">${icon}</span>
+      <span>${escapeHtml(trigger)}</span>
+      <span class="r-time mono">${shortTime(state.shiftMinutes)}</span>
+    </div>
+    <div class="r-body"></div>
+  `;
+  const body = block.querySelector('.r-body');
+  reasoningScroll.appendChild(block);
+  reasoningScroll.scrollTop = reasoningScroll.scrollHeight;
+
+  if(!apiKey){
+    const c = document.createElement('div');
+    c.className = 'r-conclusion red';
+    c.textContent = 'No API key set — click 🔑 API Key above to let Remi reason about this live.';
+    block.appendChild(c);
+    openKeyModal();
+    return;
+  }
+
+  // Step 2: Seed the conversation with the event + state snapshot as
+  // the first (and so far only) user message.
+  const messages = [{ role:'user', content: userPrompt }];
+  try{
+    // Step 3: Call Claude. Each loop iteration is ONE turn — Claude
+    // either responds with tool_use block(s) (it wants to investigate)
+    // or with text only and no tool_use (it's ready to conclude).
+    // Capped at 5 turns so a model that keeps calling tools indefinitely
+    // can't hang this event forever.
+    for(let turn=0; turn<5; turn++){
+      const { textBlocks, toolUses, lineEls } = await streamClaudeTurn(messages, body);
+
+      if(toolUses.length){
+        // Step 4: Claude chose to investigate. Record exactly what it
+        // said and called as the assistant's turn in the conversation
+        // history — Claude needs to see its own prior tool_use blocks
+        // on the next call, or the API will reject the tool_result
+        // that's about to follow.
+        console.log('[Remi] Tool(s) selected:', toolUses.map(tu=>({ name:tu.name, input:tu.input })));
+        const assistantContent = [];
+        textBlocks.forEach(t=>assistantContent.push({ type:'text', text:t }));
+        toolUses.forEach(tu=>assistantContent.push({ type:'tool_use', id:tu.id, name:tu.name, input:tu.input }));
+        messages.push({ role:'assistant', content: assistantContent });
+
+        // Step 5: Actually execute each tool against `state`, render a
+        // visible "⚙ calling ..." line for it, and package the result
+        // as a tool_result message so Claude can reason over real data
+        // (not a guess) on the next turn.
+        const toolResultContent = toolUses.map(tu=>{
+          renderToolCallLine(body, tu.name, tu.input);
+          let result;
+          try{ result = TOOL_IMPL[tu.name] ? TOOL_IMPL[tu.name](tu.input) : { error:`unknown tool ${tu.name}` }; }
+          catch(e){ result = { error: e.message }; }
+          console.log('[Remi] Tool result for', tu.name, ':', result);
+          return { type:'tool_result', tool_use_id: tu.id, content: JSON.stringify(result) };
+        });
+        messages.push({ role:'user', content: toolResultContent });
+        continue; // Step 6 happens on the next loop iteration's call.
+      }
+
+      // Step 6 (final turn): no tool_use means this text IS the
+      // conclusion. The intermediate "> ..." lines streamed during
+      // THIS turn (lineEls) get removed and replaced with a single
+      // styled conclusion bubble — lines from EARLIER turns (already
+      // appended to `body` in prior iterations) are left in place as
+      // the visible trail of what Claude checked before concluding.
+      const conclusionText = textBlocks.join(' ').trim();
+      console.log('[Remi] Agent conclusion:', conclusionText);
+      lineEls.forEach(el=>el.remove());
+      if(conclusionText){
+        const c = document.createElement('div');
+        c.className = `r-conclusion ${conclusionColorFor(conclusionText)}`;
+        c.textContent = conclusionText;
+        block.appendChild(c);
+      }
+      break;
+    }
+  } catch(err){
+    // Network failure, rate limit, or any thrown error from above —
+    // surfaced directly in the reasoning panel rather than failing
+    // silently, since a tech watching the demo needs to see why
+    // Remi went quiet on an event it should have reacted to.
+    const c = document.createElement('div');
+    c.className = 'r-conclusion red';
+    c.textContent = `Remi's reasoning service error: ${err.message}`;
+    block.appendChild(c);
+  }
+  reasoningScroll.scrollTop = reasoningScroll.scrollHeight;
+}
+
+/**
+ * Escapes a string for safe insertion into innerHTML by round-tripping
+ * it through a detached element's textContent/innerHTML. Used for
+ * trigger labels in the reasoning panel header, which are built from
+ * app-controlled strings (drug names, event types) — escaped anyway
+ * as a defensive default rather than auditing every call site.
+ * @param {string} s - Raw text to escape.
+ * @returns {string} HTML-safe string.
+ */
+function escapeHtml(s){
+  const d = document.createElement('div'); d.textContent = s; return d.innerHTML;
+}
+
+/* ============================================================
+   STAT FLASH
+============================================================ */
+/**
+ * Updates a single topbar/state-board stat number and briefly
+ * highlights it with the `.flash` CSS class. Written as a one-off
+ * targeted update (rather than always going through the full
+ * renderStateBoard() re-render) so a stat bump gets its own flash
+ * animation timed to that specific change, instead of every stat
+ * flashing together whenever anything in the shift changes.
+ * @param {string} id - DOM id of the stat element, e.g. 'stat-flags'.
+ */
+function flashStat(id){
+  const el = $(id);
+  if(!el) return;
+  el.textContent = ({'stat-scripts':state.scripts,'stat-flags':state.flags,'stat-rejects':state.rejects,'stat-followups':state.followups})[id];
+  el.classList.add('flash');
+  setTimeout(()=>el.classList.remove('flash'), 500);
+}
+
+/* ============================================================
+   STATE BOARD RENDER
+============================================================ */
+
+/**
+ * Fully re-renders the right-hand state board: shift stats,
+ * controlled-substance rows, inventory bars, and the follow-up queue.
+ *
+ * This blows away and rebuilds each list's innerHTML rather than
+ * diffing — acceptable here because the lists are short (4 CS drugs,
+ * 4 inventory items, a handful of follow-ups) and this is only called
+ * after a state-changing event, never on every animation frame.
+ * Called after every shift event and whenever flag_pharmacist() adds
+ * a follow-up mid-agent-turn, so the board never drifts out of sync
+ * with what Claude just decided.
+ */
+function renderStateBoard(){
+  $('stat-scripts').textContent = state.scripts;
+  $('stat-flags').textContent = state.flags;
+  $('stat-followups').textContent = state.followups;
+  $('stat-rejects').textContent = state.rejects;
+
+  const csList = $('cs-list');
+  csList.innerHTML = '';
+  ['oxy','hydro','add','xan'].forEach(key=>{
+    const flagState = state.csFlags[key];
+    const row = document.createElement('div');
+    row.className = 'cs-row' + (flagState==='flag' ? (state.csCritical[key] ? ' critical':' flagged') : '');
+    let statusHtml = '';
+    if(flagState === 'ok') statusHtml = `<span class="cs-status ok">✓ reconciled</span>`;
+    else if(flagState === 'flag'){
+      // Only oxycodone's discrepancy array is ever populated by the
+      // scripted timeline, so this sum is 0 for every other CS drug —
+      // see expectedCount() for the same asymmetry.
+      const diff = key==='oxy' ? state.oxyDiscrepancies.reduce((a,d)=>a+d.gap,0) : 0;
+      statusHtml = `<span class="cs-status flag">⚠ ${diff} </span>`;
+    } else statusHtml = `<span class="cs-status due">⏳ count due</span>`;
+    row.innerHTML = `<span class="cs-name">${drugNames[key]}</span><span class="cs-count">${state.cs[key]}</span>${statusHtml}`;
+    csList.appendChild(row);
+  });
+
+  const invList = $('inv-list');
+  invList.innerHTML = '';
+  ['met','ozm','lip','amx'].forEach(key=>{
+    const count = state.inv[key];
+    const pct = Math.max(0, Math.min(100, (count/invMax[key])*100));
+    let level = 'good';
+    // Ozempic uses fixed pen-count thresholds rather than percent-of-max
+    // because its max stock (30 pens) is small and the FDA shortage makes
+    // low absolute counts meaningful well before they'd look "low" as a
+    // percentage — handleFill()'s low-stock agent trigger uses the same
+    // <=3 threshold so the UI and the agent agree on what "critical" means.
+    if(key==='ozm'){ level = count<=3 ? 'low' : count<=8 ? 'warn' : 'good'; }
+    else { level = pct<15 ? 'low' : pct<35 ? 'warn' : 'good'; }
+    const row = document.createElement('div');
+    row.className = 'inv-row' + (level==='low'?' low':level==='warn'?' warn':'');
+    row.innerHTML = `
+      <div class="inv-top"><span class="nm">${drugNames[key]}</span><span class="ct mono">${count}</span></div>
+      <div class="inv-bar-track"><div class="inv-bar-fill ${level==='good'?'':level}" style="width:${pct}%"></div></div>
+    `;
+    invList.appendChild(row);
+  });
+
+  const fuList = $('fu-list');
+  fuList.innerHTML = '';
+  state.followupList.forEach(fu=>{
+    const elapsed = fu.startMin < 0 ? Math.abs(fu.startMin) + state.shiftMinutes : Math.max(0, state.shiftMinutes - fu.startMin);
+    const row = document.createElement('div');
+    row.className = 'fu-row' + (fu.overdue?' overdue':'');
+    row.innerHTML = `
+      <div class="fu-top"><span class="fu-dot"></span>${escapeHtml(fu.name)}</div>
+      <div class="fu-reason">${escapeHtml(fu.reason)}</div>
+      <div class="fu-time mono">${elapsed} min elapsed</div>
+    `;
+    fuList.appendChild(row);
+  });
+}
+
+/* ============================================================
+   EKG CANVAS
+============================================================ */
+const ekgCanvas = $('ekg-canvas');
+const ekgCtx = ekgCanvas.getContext('2d');
+let ekgAmp = 1; // current waveform amplitude multiplier; >1 while "pulsing" from a recent event, decays back to 1
+
+/**
+ * Sizes the EKG canvas's backing pixel buffer to match its CSS size
+ * at the current devicePixelRatio, so the trace stays crisp on
+ * high-DPI displays instead of being upscaled and blurry.
+ */
+function resizeEkg(){
+  ekgCanvas.width = ekgCanvas.clientWidth * devicePixelRatio;
+  ekgCanvas.height = ekgCanvas.clientHeight * devicePixelRatio;
+}
+resizeEkg();
+window.addEventListener('resize', resizeEkg);
+
+let ekgX = 0; // horizontal scroll offset into the waveform, advanced every frame
+
+/**
+ * Procedural EKG waveform, purely decorative — there is no real
+ * "heartbeat" data source, this is hand-tuned to look like a clinical
+ * monitor trace. `x` is treated as a position along the strip; the
+ * function repeats every 140 units and returns a value in roughly
+ * [-0.4, 1.0] representing vertical offset from baseline. The five
+ * piecewise segments are, in order: a small P-wave bump, a brief dip,
+ * the sharp R-wave spike up, the S-wave drop down, and a rounded T-wave —
+ * the classic five-deflection EKG shape.
+ * @param {number} x - Position along the (looping) waveform.
+ * @returns {number} Vertical offset, roughly -0.4 to 1.0.
+ */
+function ekgWave(x){
+  const t = (x % 140) / 140;
+  if(t < 0.08) return Math.sin(t/0.08*Math.PI) * 0.15;
+  if(t < 0.12) return -0.1;
+  if(t < 0.16) return ((t-0.12)/0.04) * 1.0;
+  if(t < 0.20) return 1.0 - ((t-0.16)/0.04) * 1.4;
+  if(t < 0.24) return -0.4 + ((t-0.20)/0.04) * 0.4;
+  if(t < 0.40) return Math.sin((t-0.24)/0.16*Math.PI) * 0.2;
+  return 0;
+}
+
+/**
+ * Draws one animation frame of the EKG strip and schedules the next
+ * via requestAnimationFrame — this is a self-perpetuating render loop
+ * started once at load time, not re-invoked per event (pulseEkg()
+ * only changes `ekgAmp`, which this loop reads on its next frame).
+ */
+function drawEkg(){
+  const w = ekgCanvas.width, h = ekgCanvas.height;
+  ekgCtx.clearRect(0,0,w,h);
+  ekgCtx.strokeStyle = '#00D4AA';
+  ekgCtx.lineWidth = 1.5 * devicePixelRatio;
+  ekgCtx.shadowColor = 'rgba(0,212,170,0.5)';
+  ekgCtx.shadowBlur = 4;
+  ekgCtx.beginPath();
+  const mid = h/2;
+  const scaleY = (h/2 - 4*devicePixelRatio) * ekgAmp;
+  for(let px=0; px<w; px++){
+    const v = ekgWave(px*devicePixelRatio*0.6 + ekgX);
+    const y = mid - v*scaleY;
+    if(px===0) ekgCtx.moveTo(px,y); else ekgCtx.lineTo(px,y);
+  }
+  ekgCtx.stroke();
+  ekgX += 2.2;
+  // Amplitude eases back down to baseline (1) after a pulse rather than
+  // snapping instantly, so a burst of events reads as one elevated
+  // heartbeat rather than a series of jarring jumps.
+  if(ekgAmp > 1){ ekgAmp -= 0.01; if(ekgAmp<1) ekgAmp=1; }
+  requestAnimationFrame(drawEkg);
+}
+drawEkg();
+
+/** Spikes the EKG amplitude — called from handleEvent() on every shift event so the strip visibly reacts regardless of whether that event goes on to trigger an agent turn. */
+function pulseEkg(){ ekgAmp = 1.6; }
+
+/* ============================================================
+   TOP BAR CONTROLS
+============================================================ */
+$('btn-start').addEventListener('click', startShift);
+$('btn-pause').addEventListener('click', pauseShift);
+$('btn-reset').addEventListener('click', resetShift);
+document.querySelectorAll('.speed-pill').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    document.querySelectorAll('.speed-pill').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    state.speed = parseInt(btn.dataset.speed, 10);
+  });
+});
+
+/* ============================================================
+   COMMAND BAR + CLAUDE API
+============================================================ */
+const cmdInput = $('cmd-input');
+const cmdSend = $('cmd-send');
+const keyModalOverlay = $('key-modal-overlay');
+const keyInput = $('key-input');
+
+/**
+ * Reads the Anthropic API key from localStorage.
+ * Stored client-side (not in any backend) because this app has no
+ * backend — see the file header. The key never leaves the browser
+ * except in the `x-api-key` header of requests to api.anthropic.com.
+ * @returns {string} The saved key, or '' if none has been set.
+ */
+function getApiKey(){ return localStorage.getItem('remi_api_key') || ''; }
+
+/** Opens the API key modal, pre-filled with whatever key is currently saved (so re-opening it to check/replace a key doesn't show a blank field). */
+function openKeyModal(){
+  keyInput.value = getApiKey();
+  keyModalOverlay.classList.add('active');
+  keyInput.focus();
+}
+/** Closes the API key modal without saving any change to the input. */
+function closeKeyModal(){ keyModalOverlay.classList.remove('active'); }
+
+$('btn-key').addEventListener('click', openKeyModal);
+$('key-cancel').addEventListener('click', closeKeyModal);
+$('key-save').addEventListener('click', ()=>{
+  localStorage.setItem('remi_api_key', keyInput.value.trim());
+  closeKeyModal();
+});
+keyInput.addEventListener('keydown', (e)=>{ if(e.key === 'Enter') $('key-save').click(); });
+
+/**
+ * System prompt for the command-bar Q&A (askRemi), distinct from
+ * buildAgentSystemPrompt(). This path is intentionally NOT agentic —
+ * it's a single-turn question-answering prompt with no `tools` array,
+ * for free-form questions like "what should I order today?" where
+ * tool-use round trips would add latency without adding accuracy.
+ * The state summary is hand-picked and hardcoded here (rather than
+ * reusing pharmacyStateSnapshot()) because this prompt predates the
+ * agentic engine and was kept minimal on purpose for fast replies.
+ * @returns {string} System prompt for the single-turn command-bar call.
+ */
+function buildSystemPrompt(){
+  return `You are Remi, an AI assistant for a retail pharmacy technician. Be direct and brief — 3-5 sentences maximum. The tech is busy. Use correct pharmacy terminology. Never make clinical decisions. Always recommend pharmacist review for anything involving patient safety or controlled substances.
+
+Current shift state:
+- Shift time: ${minutesToTimeStr(state.shiftMinutes)}
+- Scripts filled: ${state.scripts}
+- Oxycodone 5mg: expected ${state.oxyExpected}, actual ${state.cs.oxy}, discrepancies: ${state.oxyDiscrepancies.length}
+- Diversion detected: ${state.diversionDetected}
+- Open insurance rejects: ${state.rejects}
+- Ozempic stock: ${state.inv.ozm} pens (FDA shortage active)
+- Adderall stock: ${state.cs.add} tablets
+- Open follow-ups: 2`;
+}
+
+/**
+ * Handles a free-form question typed into the command bar.
+ * A single non-streamed, non-tool-use call to Claude — see
+ * buildSystemPrompt() above for why this path stays simple rather
+ * than going through the runAgentTurn()/streamClaudeTurn() engine.
+ * @param {string} question - Raw text the tech typed into the command bar.
+ * @returns {Promise<void>} Resolves once the answer (or an error) has been rendered into the reasoning panel.
+ */
+async function askRemi(question){
+  const apiKey = getApiKey();
+  if(!apiKey){
+    openKeyModal();
+    return;
+  }
+  if(idleState.parentNode) idleState.remove();
+  const block = document.createElement('div');
+  block.className = 'r-block';
+  block.innerHTML = `
+    <div class="r-header">
+      <span class="r-icon">💬</span>
+      <span>user asked: ${escapeHtml(question)}</span>
+      <span class="r-time mono">${shortTime(state.shiftMinutes)}</span>
+    </div>
+    <div class="r-body">
+      <div class="r-line step" style="animation-delay:0ms">> reviewing shift state...</div>
+      <div class="r-line step" style="animation-delay:80ms">> consulting Remi reasoning model...</div>
+    </div>
+  `;
+  reasoningScroll.appendChild(block);
+  reasoningScroll.scrollTop = reasoningScroll.scrollHeight;
+
+  try{
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1000,
+        system: buildSystemPrompt(),
+        messages: [{ role: 'user', content: question }]
+      })
+    });
+    const data = await resp.json();
+    let answer = '(no response)';
+    if(data && data.content && data.content[0] && data.content[0].text) answer = data.content[0].text;
+    else if(data && data.error) answer = `API error: ${data.error.message || 'unknown error'}`;
+    if(!resp.ok && data && data.error && data.error.type === 'authentication_error') openKeyModal();
+    const c = document.createElement('div');
+    c.className = 'r-conclusion teal';
+    c.textContent = answer;
+    block.appendChild(c);
+  } catch(err){
+    const c = document.createElement('div');
+    c.className = 'r-conclusion red';
+    c.textContent = `Could not reach Remi's reasoning service: ${err.message}`;
+    block.appendChild(c);
+  }
+  reasoningScroll.scrollTop = reasoningScroll.scrollHeight;
+}
+
+/** Reads the command bar input, clears it, and dispatches the question to askRemi() — split out from the event listeners below so both Enter-to-submit and the Send button call one code path. */
+function submitCommand(){
+  const q = cmdInput.value.trim();
+  if(!q) return;
+  cmdInput.value = '';
+  askRemi(q);
+}
+cmdSend.addEventListener('click', submitCommand);
+cmdInput.addEventListener('keydown', e=>{ if(e.key === 'Enter') submitCommand(); });
+
+/* ============================================================
+   MODE SWITCH
+============================================================ */
+const techMode = $('tech-mode');
+const patientMode = $('patient-mode');
+
+$('btn-to-patient').addEventListener('click', ()=>{
+  techMode.classList.add('swapped');
+  patientMode.classList.add('active');
+  renderPatientStep('welcome');
+});
+$('btn-to-tech').addEventListener('click', ()=>{
+  patientMode.classList.remove('active');
+  techMode.classList.remove('swapped');
+});
+
+/* ============================================================
+   CROSS-MODE ALERT FLASH
+   Surfaces something Tech Mode needs to know while the screen is
+   currently showing Patient Mode (e.g. a patient picking up a
+   flagged controlled substance) — the tech is facing the patient,
+   not the screen, so this needs to be unmissable but brief.
+============================================================ */
+
+/**
+ * Shows a transient banner alert over whichever mode is currently on
+ * screen. Auto-dismisses after 4.5s — long enough to register, short
+ * enough not to block patient-facing content if the tech is mid-pickup-flow.
+ * @param {string} text - Alert message to display.
+ */
+function flashCrossModeAlert(text){
+  const el = $('cross-mode-flash');
+  el.textContent = text;
+  el.classList.add('show');
+  setTimeout(()=>el.classList.remove('show'), 4500);
+}
+
+/* ============================================================
+   PATIENT MODE FLOW
+============================================================ */
+const patientData = { lastName:'', dob:'', drugKey:null, copay:0, insPaid:0, question:'' };
+const pickupDrugPool = [
+  { key:'lip', label:'Lipitor 20mg', qty:'30 tablets', prescriber:'Dr. R. Allen', copay:12 },
+  { key:'met', label:'Metformin 500mg', qty:'90 tablets', prescriber:'Dr. K. Osei', copay:8 },
+  { key:'amx', label:'Amoxicillin 500mg', qty:'21 capsules', prescriber:'Dr. M. Lin', copay:5 },
+  { key:'ozm', label:'Ozempic 0.5mg', qty:'1 pen', prescriber:'Dr. R. Allen', copay:65 },
+  { key:'oxy', label:'Oxycodone 5mg', qty:'20 tablets', prescriber:'Dr. J. Carter', copay:10 }
+];
+
+const stepContainer = $('patient-step-container');
+let patientResetTimer = null;
+
+/** Cancels the pending patient-mode idle-reset timeout, if one is scheduled. Called at the top of every renderPatientStep() so navigating to a new step always supersedes any earlier step's reset timer rather than stacking them. */
+function clearResetTimer(){ if(patientResetTimer) clearTimeout(patientResetTimer); }
+
+/**
+ * Renders one screen of the Patient Mode pickup flow into
+ * `#patient-step-container`. This is a small state machine driven
+ * entirely by the `step` string — there is no separate router/state
+ * object for patient mode beyond `patientData`; the DOM itself (which
+ * step is currently rendered) IS the state, and each step's buttons
+ * call renderPatientStep() again with the next step name.
+ *
+ * Step graph (happy path in order, with branches):
+ *   welcome → verify → found → copay → counseling → confirmation
+ *   - welcome can also branch to 'ask-question' → 'waiting-pharmacist'
+ *     (patient has a question instead of a pickup)
+ *   - found can branch to 'team-member-needed' if checkCrossModeAndProceed()
+ *     finds the picked-up drug has an active CS flag/diversion alert
+ *   - copay can branch to 'copay-question' (patient questions the price)
+ *   - counseling can branch to 'counseling-question' (patient wants pharmacist input)
+ *
+ * Most steps auto-advance or auto-reset back to 'welcome' after a
+ * timeout via clearResetTimer()/setTimeout — this is a kiosk-style
+ * flow meant to idle back to a clean welcome screen if a patient walks
+ * away mid-interaction, so the next patient isn't shown someone else's data.
+ *
+ * @param {string} step - Which screen to render (see step graph above).
+ * @param {object} [opts] - Render options.
+ * @param {boolean} [opts.back] - If true, applies the 'back' transition direction class instead of the default forward one.
+ */
+function renderPatientStep(step, opts={}){
+  clearResetTimer();
+  const dirClass = opts.back ? 'p-step back' : 'p-step';
+  let html = '';
+
+  if(step === 'welcome'){
+    html = `
+      <div class="${dirClass}">
+        <div class="remi-avatar"><span class="r-letter">R</span><span class="r-smile"></span></div>
+        <div class="patient-greeting">Hi, I'm Remi</div>
+        <div class="patient-card">
+          <div class="p-title">Here to pick up a prescription?</div>
+          <button class="p-btn p-btn-primary" id="p-yes">Yes, pick up</button>
+          <button class="p-btn p-btn-secondary" id="p-question">I have a question</button>
+        </div>
+      </div>`;
+    stepContainer.innerHTML = html;
+    $('p-yes').addEventListener('click', ()=>renderPatientStep('verify'));
+    $('p-question').addEventListener('click', ()=>renderPatientStep('ask-question'));
+    return;
+  }
+
+  if(step === 'ask-question'){
+    html = `
+      <div class="${dirClass}">
+        <div class="remi-avatar"><span class="r-letter">R</span><span class="r-smile"></span></div>
+        <div class="patient-card">
+          <div class="p-title">What's your question?</div>
+          <textarea class="p-input" id="p-q-text" rows="3" placeholder="Type your question here..." style="resize:none;"></textarea>
+          <button class="p-btn p-btn-primary" id="p-q-submit">Submit</button>
+        </div>
+      </div>`;
+    stepContainer.innerHTML = html;
+    $('p-q-submit').addEventListener('click', ()=>{
+      const q = $('p-q-text').value.trim();
+      state.followupList.push({ name:'Walk-in patient', reason: q ? `Question: ${q}` : 'General question at counter', startMin: state.shiftMinutes, overdue:false });
+      state.followups++; renderStateBoard();
+      renderPatientStep('waiting-pharmacist');
+    });
+    return;
+  }
+
+  if(step === 'waiting-pharmacist'){
+    html = `
+      <div class="${dirClass}">
+        <div class="patient-card">
+          <div class="p-waiting">
+            <div class="p-spinner"></div>
+            I'll let the pharmacist know — please wait one moment.
+          </div>
+        </div>
+      </div>`;
+    stepContainer.innerHTML = html;
+    patientResetTimer = setTimeout(()=>renderPatientStep('welcome'), 8000);
+    return;
+  }
+
+  if(step === 'verify'){
+    html = `
+      <div class="${dirClass}">
+        <div class="patient-card">
+          <div class="p-title">Let's verify your identity</div>
+          <label class="p-label">Your last name</label>
+          <input class="p-input" id="p-lastname" type="text" placeholder="Smith">
+          <label class="p-label">Date of birth (MM/DD/YYYY)</label>
+          <input class="p-input" id="p-dob" type="text" placeholder="01/15/1980">
+          <button class="p-btn p-btn-primary" id="p-verify-continue">Continue →</button>
+        </div>
+      </div>`;
+    stepContainer.innerHTML = html;
+    $('p-verify-continue').addEventListener('click', ()=>{
+      const ln = $('p-lastname').value.trim();
+      const dob = $('p-dob').value.trim();
+      if(!ln || !dob){
+        $('p-lastname').style.borderColor = ln ? 'rgba(0,168,133,0.25)' : '#F39C12';
+        $('p-dob').style.borderColor = dob ? 'rgba(0,168,133,0.25)' : '#F39C12';
+        return;
+      }
+      patientData.lastName = ln; patientData.dob = dob;
+      const drug = pickupDrugPool[Math.floor(Math.random()*pickupDrugPool.length)];
+      patientData.drugKey = drug;
+      checkCrossModeAndProceed(drug);
+    });
+    return;
+  }
+
+  if(step === 'team-member-needed'){
+    html = `
+      <div class="${dirClass}">
+        <div class="patient-card">
+          <div class="p-waiting">
+            <div class="p-spinner"></div>
+            One moment — we're getting a team member to help you.
+          </div>
+        </div>
+      </div>`;
+    stepContainer.innerHTML = html;
+    return;
+  }
+
+  if(step === 'found'){
+    const drug = patientData.drugKey;
+    html = `
+      <div class="${dirClass}">
+        <div class="patient-card">
+          <div class="p-check">✓</div>
+          <span class="p-status-pill">Ready for pickup</span>
+          <div class="p-drugname">${drug.label}</div>
+          <div class="p-confirm-card">
+            <div class="p-confirm-row"><span class="lbl">Patient</span><span class="val">${escapeHtml(patientData.lastName)}</span></div>
+            <div class="p-confirm-row"><span class="lbl">Prescriber</span><span class="val">${drug.prescriber}</span></div>
+            <div class="p-confirm-row"><span class="lbl">Quantity</span><span class="val mono">${drug.qty}</span></div>
+          </div>
+          <button class="p-btn p-btn-primary" id="p-found-continue">Continue →</button>
+        </div>
+      </div>`;
+    stepContainer.innerHTML = html;
+    $('p-found-continue').addEventListener('click', ()=>renderPatientStep('copay'));
+    return;
+  }
+
+  if(step === 'copay'){
+    const drug = patientData.drugKey;
+    const totalCost = drug.copay * 7 + 20;
+    const copay = drug.copay > 0 ? drug.copay + Math.floor(Math.random()*40) : drug.copay;
+    patientData.copay = copay;
+    patientData.insPaid = totalCost - copay;
+    const showGoodRx = copay > 50;
+    const goodRxPrice = Math.max(15, Math.round(copay * 0.55));
+    html = `
+      <div class="${dirClass}">
+        <div class="patient-card">
+          <div class="p-title">Your copay today is $${copay.toFixed(2)}</div>
+          <div class="p-confirm-card">
+            <div class="p-confirm-row"><span class="lbl">Insurance paid</span><span class="val">$${patientData.insPaid.toFixed(2)}</span></div>
+            <div class="p-confirm-row"><span class="lbl">Your share</span><span class="val">$${copay.toFixed(2)}</span></div>
+          </div>
+          ${showGoodRx ? `<div class="p-goodrx">💡 Good news — GoodRx cash price is $${goodRxPrice.toFixed(2)}, which is lower. Show this to your pharmacist.</div>` : ''}
+          <button class="p-btn p-btn-primary" id="p-copay-ok">That works for me</button>
+          <button class="p-btn p-btn-secondary" id="p-copay-question">I have a question about my cost</button>
+        </div>
+      </div>`;
+    stepContainer.innerHTML = html;
+    $('p-copay-ok').addEventListener('click', ()=>renderPatientStep('counseling'));
+    $('p-copay-question').addEventListener('click', ()=>renderPatientStep('copay-question'));
+    return;
+  }
+
+  if(step === 'copay-question'){
+    html = `
+      <div class="${dirClass}">
+        <div class="patient-card">
+          <div class="p-title">What's your question about the cost?</div>
+          <textarea class="p-input" id="p-cq-text" rows="3" placeholder="Type your question here..." style="resize:none;"></textarea>
+          <button class="p-btn p-btn-primary" id="p-cq-submit">Submit</button>
+        </div>
+      </div>`;
+    stepContainer.innerHTML = html;
+    $('p-cq-submit').addEventListener('click', ()=>{
+      const q = $('p-cq-text').value.trim();
+      state.followupList.push({ name: patientData.lastName || 'Patient', reason: `Cost question — ${patientData.drugKey.label}${q?`: ${q}`:''}`, startMin: state.shiftMinutes, overdue:false });
+      state.followups++; renderStateBoard();
+      renderPatientStep('counseling');
+    });
+    return;
+  }
+
+  if(step === 'counseling'){
+    const drug = patientData.drugKey;
+    html = `
+      <div class="${dirClass}">
+        <div class="patient-card">
+          <div class="p-title">Would you like to speak with our pharmacist about ${drug.label} today?</div>
+          <div class="p-sub">They can answer questions about how to take it, what to expect, and any interactions.</div>
+          <button class="p-btn p-btn-primary" id="p-counsel-yes">Yes please</button>
+          <button class="p-btn p-btn-secondary" id="p-counsel-no">No thanks, I'm good</button>
+        </div>
+      </div>`;
+    stepContainer.innerHTML = html;
+    $('p-counsel-yes').addEventListener('click', ()=>renderPatientStep('counseling-question'));
+    $('p-counsel-no').addEventListener('click', ()=>{
+      state.followupList.push({ name: patientData.lastName || 'Patient', reason: `OBRA counseling offered — declined (${drug.label})`, startMin: state.shiftMinutes, overdue:false });
+      renderStateBoard();
+      renderPatientStep('confirmation');
+    });
+    return;
+  }
+
+  if(step === 'counseling-question'){
+    const drug = patientData.drugKey;
+    html = `
+      <div class="${dirClass}">
+        <div class="patient-card">
+          <div class="p-title">I'll let them know you're waiting — they'll be right with you.</div>
+          <div class="p-sub">Is there a specific question you'd like answered?</div>
+          <textarea class="p-input" id="p-counsel-text" rows="3" placeholder="Optional — type your question..." style="resize:none;"></textarea>
+          <button class="p-btn p-btn-primary" id="p-counsel-submit">Submit</button>
+        </div>
+      </div>`;
+    stepContainer.innerHTML = html;
+    $('p-counsel-submit').addEventListener('click', ()=>{
+      const q = $('p-counsel-text').value.trim();
+      state.followupList.push({ name: patientData.lastName || 'Patient', reason: `Pharmacist counseling requested — ${drug.label}${q?`: ${q}`:''}`, startMin: state.shiftMinutes, overdue:false });
+      state.followups++; renderStateBoard();
+      renderPatientStep('confirmation');
+    });
+    return;
+  }
+
+  if(step === 'confirmation'){
+    html = `
+      <div class="${dirClass}">
+        <div class="patient-card">
+          <div class="p-check">✓</div>
+          <div class="p-title">You're all set, ${escapeHtml(patientData.lastName) || 'there'}! 🎉</div>
+          <div class="p-sub">Your ${patientData.drugKey.label} prescription is ready at the counter.<br>Have a great day.</div>
+        </div>
+      </div>`;
+    stepContainer.innerHTML = html;
+    patientResetTimer = setTimeout(()=>{
+      patientData.lastName=''; patientData.dob=''; patientData.drugKey=null;
+      renderPatientStep('welcome');
+    }, 8000);
+    return;
+  }
+}
+
+/**
+ * Gate between the patient-mode 'verify' step and 'found' — checks
+ * whether the drug this patient is picking up has an active
+ * controlled-substance flag (set by Tech Mode's handleDiscrepancy()/
+ * handleDiversion()) before letting the pickup flow continue normally.
+ *
+ * This is THE cross-mode intelligence link: Tech Mode's `state` and
+ * Patient Mode's flow read the same global object, so a discrepancy
+ * Claude flagged minutes earlier on the Tech Mode screen can silently
+ * redirect a patient interaction happening on the same device later,
+ * without the patient ever seeing why.
+ *
+ * @param {{key:string,label:string,...}} drug - The pickup-pool drug entry the patient is collecting (see `pickupDrugPool`).
+ */
+function checkCrossModeAndProceed(drug){
+  if(drug.key === 'oxy' && (state.csFlags.oxy === 'flag' || state.diversionDetected)){
+    renderPatientStep('team-member-needed');
+    flashCrossModeAlert('⚠ Patient at counter for flagged CS drug — tech required');
+    state.followupList.push({ name: patientData.lastName || 'Patient', reason: 'Flagged controlled substance pickup — tech required at counter', startMin: state.shiftMinutes, overdue:true });
+    state.followups++;
+    renderStateBoard();
+    return;
+  }
+  renderPatientStep('found');
+}
+
+/* ============================================================
+   RESPONSIVE GUARD
+   This app is built for a fixed in-store kiosk/tablet layout (the
+   real-world hardware vision in the README), not for arbitrary phone
+   screens, so below a hard width cutoff it shows a rotate/widen
+   message instead of attempting a responsive layout that was never
+   designed for the dual-mode dashboard.
+============================================================ */
+
+/** Toggles the full-screen "please rotate/widen" overlay based on viewport width. Bound to both an initial call and the window resize listener below so it's correct on load and stays correct as the window is resized. */
+function checkResponsive(){
+  const warn = $('responsive-warning');
+  if(window.innerWidth < 1024){
+    warn.style.display = 'flex';
+  } else {
+    warn.style.display = 'none';
+  }
+}
+window.addEventListener('resize', checkResponsive);
+checkResponsive();
+
+/* ============================================================
+   SIDEBAR + VIEW SWITCHING
+   Remi is structured as a single app shell with seven navigable
+   sections (Dashboard + six new operational views) rather than one
+   screen. Switching views never tears down or rebuilds the dashboard —
+   it's just a CSS `.active` toggle — but the six new views ARE
+   rebuilt from `state` every time they're switched into, since their
+   data (CS log, inventory, follow-ups) can change while the tech is
+   looking at a different view.
+   @author Anam
+============================================================ */
+
+/** Par stock levels (the "reorder at this level" threshold), used by the Inventory view's status pills and reorder list. Not part of `state` — these are fixed reference thresholds, not something a shift event changes. */
+const PAR_LEVELS = { met:120, ozm:10, lip:50, amx:100, oxy:60, hydro:40, add:25, xan:80 };
+
+/** Reference "max stock" for controlled substances, shown in the Inventory grid alongside the standard-inventory `invMax` table. CS drugs don't have a hard max the way standard inventory does (perpetual inventory just tracks what's on hand), so this uses each drug's shift-starting count as a stable display reference. */
+function csMaxFor(key){ return state.csStart[key]; }
+
+/**
+ * Switches the active `.view` in the content area and highlights the
+ * matching sidebar item. Always re-renders the destination view's
+ * content from current `state` before showing it (cheap for these view
+ * sizes — see renderStateBoard()'s docs for the same reasoning), so a
+ * view switched into mid-shift never shows stale data from when it was
+ * last visited.
+ * @param {string} viewName - One of 'dashboard'|'dispensing'|'inventory'|'followups'|'interactions'|'reports'|'settings'.
+ */
+function switchView(viewName){
+  console.log('[Remi] Switching view:', viewName);
+  document.querySelectorAll('.view').forEach(el => el.classList.toggle('active', el.id === `view-${viewName}`));
+  document.querySelectorAll('.sidebar-item').forEach(el => el.classList.toggle('active', el.dataset.view === viewName));
+
+  if(viewName === 'dispensing') renderDispensingView();
+  else if(viewName === 'inventory') renderInventoryView();
+  else if(viewName === 'followups') renderFollowupsView();
+  else if(viewName === 'reports') renderReportsView();
+  else if(viewName === 'settings') renderSettingsView();
+  // 'dashboard' needs no rebuild (it's the always-live original layout);
+  // 'interactions' is a checker, not a state mirror, so it only
+  // renders in response to the user adding drugs and clicking Check.
+}
+
+document.querySelectorAll('.sidebar-item').forEach(item => {
+  item.addEventListener('click', () => switchView(item.dataset.view));
+});
+
+/* ============================================================
+   VIEW: DISPENSING
+   Full controlled-substance log for the shift, built from
+   `state.csLog` (every CS fill, regardless of whether it ended up
+   flagged) cross-referenced against `state.oxyDiscrepancies` for the
+   Delta column. This is the audit-grade detail view that Tech Mode's
+   compact "Controlled Substances" widget doesn't have room to show.
+============================================================ */
+
+/**
+ * Builds the full dispensing timeline for a drug: every logged fill
+ * PLUS every count-cycle discrepancy, merged and sorted by time.
+ *
+ * This intentionally does NOT attribute a discrepancy's gap to any
+ * single fill row — that would misrepresent the domain. A discrepancy
+ * means a count cycle found a gap with no transaction-level
+ * explanation (see trace_discrepancy's tool description); every
+ * individual fill row is, by definition, fully accounted for at the
+ * moment it's logged (expected === actual). The gap only shows up on
+ * its own "COUNT CYCLE" row, which is the accurate picture of why
+ * these are hard to trace in real pharmacies.
+ *
+ * @param {string} [drugFilter] - If set, restricts to one drug key.
+ * @returns {Array<{time:string, atMin:number, drug:string, kind:'fill'|'count', qty:number|null, pt:string, expected:number, actual:number, delta:number, flagged:boolean}>}
+ */
+function dispensingTimeline(drugFilter){
+  const fillRows = state.csLog
+    .filter(e => !drugFilter || e.drug === drugFilter)
+    .map(e => ({
+      atMin: e.atMin, drug: e.drug, kind: 'fill', qty: e.qty, pt: e.pt,
+      expected: e.runningCount, actual: e.runningCount, delta: 0,
+      flagged: false
+    }));
+  const countRows = (drugFilter && drugFilter !== 'oxy' ? [] : state.oxyDiscrepancies)
+    .map(d => ({
+      atMin: d.at, drug: 'oxy', kind: 'count', qty: null, pt: `Count cycle #${d.n}`,
+      expected: state.oxyExpected - state.oxyDiscrepancies.filter(x=>x.at>d.at).reduce((s,x)=>s+x.gap,0),
+      actual: state.oxyExpected - state.oxyDiscrepancies.filter(x=>x.at>=d.at).reduce((s,x)=>s+x.gap,0),
+      delta: d.gap, flagged: true
+    }));
+  return [...fillRows, ...countRows]
+    .map(r => ({ ...r, time: shortTime(r.atMin) }))
+    .sort((a,b) => a.atMin - b.atMin);
+}
+
+/**
+ * Renders the Dispensing view's table and (re)populates its drug
+ * filter dropdown. Reads filter selections from the DOM each call
+ * rather than tracking them in `state`, since these are view-local UI
+ * preferences, not shift data.
+ */
+function renderDispensingView(){
+  console.log('[Remi] Rendering Dispensing view, csLog entries:', state.csLog.length);
+  const drugSelect = $('dispensing-filter-drug');
+  if(drugSelect.options.length <= 1){
+    Object.keys(state.cs).forEach(k => {
+      const opt = document.createElement('option');
+      opt.value = k; opt.textContent = drugNames[k];
+      drugSelect.appendChild(opt);
+    });
+  }
+  const drugFilter = drugSelect.value;
+  const statusFilter = $('dispensing-filter-status').value;
+
+  const rows = dispensingTimeline(drugFilter || undefined)
+    .filter(r => !statusFilter || (statusFilter === 'flagged' ? r.flagged : !r.flagged));
+
+  const tbody = $('dispensing-tbody');
+  tbody.innerHTML = rows.length ? rows.map(r => `
+    <tr class="${r.flagged ? 'flagged' : ''}">
+      <td class="mono-cell">${r.time}</td>
+      <td>${escapeHtml(drugNames[r.drug])}${r.kind==='count' ? ' <span class="pill warn">COUNT</span>' : ''}</td>
+      <td class="mono-cell">${r.qty !== null ? r.qty : '—'}</td>
+      <td>${escapeHtml(r.pt)}</td>
+      <td>Tech</td>
+      <td class="mono-cell">${r.expected}</td>
+      <td class="mono-cell">${r.actual}</td>
+      <td class="mono-cell">${r.delta > 0 ? '+' : ''}${r.delta}</td>
+    </tr>
+  `).join('') : `<tr><td colspan="8" style="color:var(--tx3); text-align:center; padding:24px;">No dispensing activity ${drugFilter || statusFilter ? 'matches this filter' : 'yet this shift'}.</td></tr>`;
+}
+
+$('dispensing-filter-drug').addEventListener('change', renderDispensingView);
+$('dispensing-filter-status').addEventListener('change', renderDispensingView);
+
+/**
+ * Exports the full (unfiltered) controlled-substance log as a CSV
+ * file via a Blob + temporary anchor download — no server round trip,
+ * consistent with this app having no backend at all.
+ */
+function exportDispensingCsv(){
+  const rows = dispensingTimeline();
+  console.log('[Remi] Exporting dispensing CSV, rows:', rows.length);
+  const header = ['Time','Drug','Qty','Patient','Tech','Expected','Actual','Delta'];
+  const lines = [header.join(',')];
+  rows.forEach(r => {
+    lines.push([r.time, `"${drugNames[r.drug]}"`, r.qty ?? '', `"${r.pt}"`, 'Tech', r.expected, r.actual, r.delta].join(','));
+  });
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `remi-dispensing-log-${minutesToTimeStr(state.shiftMinutes).replace(/[: ]/g,'')}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+$('dispensing-export').addEventListener('click', exportDispensingCsv);
+
+/* ============================================================
+   VIEW: INVENTORY
+   The compact "Inventory"/"Controlled Substances" widgets on the
+   Dashboard only show 4 standard drugs + 4 CS drugs with no par
+   levels or edit capability. This view is the full management grid:
+   every drug, par/max reference, status, and an inline-editable
+   current-stock field for manual tech corrections.
+============================================================ */
+
+/**
+ * Computes a status pill ('good'|'warn'|'low') for a drug given its
+ * current stock and par level — shared by the grid rows and the
+ * reorder list so "below par" means the same thing in both places.
+ * @param {number} stock - Current on-hand count.
+ * @param {number} par - Reorder threshold for this drug.
+ * @returns {'good'|'warn'|'low'}
+ */
+function stockStatus(stock, par){
+  if(stock <= par * 0.5) return 'low';
+  if(stock <= par) return 'warn';
+  return 'good';
+}
+
+/**
+ * Renders the full Inventory grid (all 8 drugs) and the auto-generated
+ * reorder list (anything at or below its par level). Re-runs on every
+ * view switch and after every inline edit, so the reorder list never
+ * lags behind a manual count correction.
+ */
+function renderInventoryView(){
+  console.log('[Remi] Rendering Inventory view.');
+  const allKeys = [...Object.keys(state.inv), ...Object.keys(state.cs)];
+  const tbody = $('inventory-tbody');
+  tbody.innerHTML = allKeys.map(key => {
+    const isCS = key in state.cs;
+    const stock = isCS ? state.cs[key] : state.inv[key];
+    const max = isCS ? csMaxFor(key) : invMax[key];
+    const par = PAR_LEVELS[key];
+    const status = stockStatus(stock, par);
+    const updated = state.lastUpdated[key] != null ? shortTime(state.lastUpdated[key]) : '—';
+    return `
+      <tr class="${status === 'low' ? 'flagged' : ''}">
+        <td>${escapeHtml(drugNames[key])}${isCS ? ' <span class="pill warn" style="background:var(--s3);color:var(--tx2);">CS</span>' : ''}</td>
+        <td><input type="number" class="inv-edit" data-drug="${key}" data-cs="${isCS}" value="${stock}" min="0"></td>
+        <td class="mono-cell">${par}</td>
+        <td class="mono-cell">${max}</td>
+        <td><span class="pill ${status}">${status === 'low' ? '⚠ low' : status === 'warn' ? '◐ reorder soon' : '✓ good'}</span>${key==='ozm' ? ' <span class="pill warn">FDA shortage</span>' : ''}</td>
+        <td class="mono-cell">${updated}</td>
+      </tr>`;
+  }).join('');
+
+  tbody.querySelectorAll('.inv-edit').forEach(input => {
+    input.addEventListener('change', () => {
+      const key = input.dataset.drug;
+      const isCS = input.dataset.cs === 'true';
+      const value = Math.max(0, parseInt(input.value, 10) || 0);
+      console.log('[Remi] Manual inventory count edit:', key, '->', value);
+      if(isCS) state.cs[key] = value; else state.inv[key] = value;
+      state.lastUpdated[key] = state.shiftMinutes;
+      renderInventoryView();
+      renderStateBoard();
+    });
+  });
+
+  const reorder = allKeys.filter(key => {
+    const stock = key in state.cs ? state.cs[key] : state.inv[key];
+    return stock <= PAR_LEVELS[key];
+  });
+  const reorderEl = $('reorder-list');
+  reorderEl.innerHTML = reorder.length ? reorder.map(key => `
+    <div class="fu-row${stockStatus(key in state.cs ? state.cs[key] : state.inv[key], PAR_LEVELS[key])==='low'?' overdue':''}">
+      <div class="fu-top"><span class="fu-dot"></span>${escapeHtml(drugNames[key])}</div>
+      <div class="fu-reason">On hand: ${key in state.cs ? state.cs[key] : state.inv[key]} · Par: ${PAR_LEVELS[key]}${key==='ozm' ? ' · FDA shortage — expect extended lead time' : ''}</div>
+    </div>
+  `).join('') : `<div style="color:var(--tx3); font-size:12px;">Nothing below par right now.</div>`;
+}
+
+/* ============================================================
+   VIEW: FOLLOW-UPS
+   Full version of the Dashboard's compact follow-up widget, with the
+   actions a tech actually needs mid-shift: add a new one, mark it
+   done, push it later, or hand it to the pharmacist. `state.followupList`
+   items don't have a `status` field by default (the original seed
+   data and flag_pharmacist() both just push bare {name,reason,startMin,
+   overdue} objects) — this view treats a missing `status` as 'open'
+   rather than migrating every existing write site to always set one.
+============================================================ */
+
+/**
+ * Renders the full follow-up queue with filter applied, plus wires
+ * the add-new form and each card's action buttons. Re-attaches event
+ * listeners on every render since the DOM is fully rebuilt each time
+ * (`innerHTML =`) — there's nothing to leak since old listeners die
+ * with the elements they were on.
+ */
+function renderFollowupsView(){
+  console.log('[Remi] Rendering Follow-ups view, queue size:', state.followupList.length);
+  const filter = $('followup-filter').value;
+  const listEl = $('followup-list-full');
+
+  const visible = state.followupList.filter(fu => {
+    const status = fu.status || 'open';
+    if(filter === 'overdue') return fu.overdue && status !== 'completed';
+    if(filter === 'today') return !fu.overdue && status === 'open';
+    return true; // 'all'
+  });
+
+  listEl.innerHTML = visible.length ? visible.map((fu, i) => {
+    const status = fu.status || 'open';
+    const idx = state.followupList.indexOf(fu);
+    const elapsed = fu.startMin < 0 ? Math.abs(fu.startMin) + state.shiftMinutes : Math.max(0, state.shiftMinutes - fu.startMin);
+    return `
+      <div class="fu-card${fu.overdue && status!=='completed' ? ' overdue' : ''}" style="${status==='completed' ? 'opacity:.5;' : ''}">
+        <div class="fu-card-top">
+          <div><b>${escapeHtml(fu.name)}</b> <span style="color:var(--tx3); font-size:11px;">· ${elapsed} min elapsed</span></div>
+          <span class="pill ${status==='completed'?'good':status==='escalated'?'low':'warn'}">${status}</span>
+        </div>
+        <div class="fu-reason">${escapeHtml(fu.reason)}</div>
+        ${status !== 'completed' ? `
+        <div class="fu-card-actions">
+          <button data-action="complete" data-idx="${idx}">✓ Complete</button>
+          <button data-action="defer" data-idx="${idx}">⏭ Defer 30m</button>
+          <button data-action="escalate" data-idx="${idx}">⚠ Escalate</button>
+        </div>` : ''}
+      </div>`;
+  }).join('') : `<div style="color:var(--tx3); font-size:12px; padding:12px 0;">No follow-ups match this filter.</div>`;
+
+  listEl.querySelectorAll('button[data-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = parseInt(btn.dataset.idx, 10);
+      const fu = state.followupList[idx];
+      if(!fu) return;
+      const action = btn.dataset.action;
+      console.log('[Remi] Follow-up action:', action, 'on', fu.name);
+      if(action === 'complete') fu.status = 'completed';
+      else if(action === 'defer'){ fu.startMin = state.shiftMinutes; fu.overdue = false; fu.status = 'open'; }
+      else if(action === 'escalate'){ fu.status = 'escalated'; fu.overdue = true; fu.reason = `[Escalated to pharmacist] ${fu.reason}`; }
+      renderFollowupsView();
+      renderStateBoard();
+    });
+  });
+}
+$('followup-filter').addEventListener('change', renderFollowupsView);
+
+$('fu-new-add').addEventListener('click', () => {
+  const name = $('fu-new-name').value.trim();
+  const reason = $('fu-new-reason').value.trim();
+  if(!name || !reason) return;
+  console.log('[Remi] Adding new follow-up:', name, reason);
+  state.followupList.push({ name, reason, startMin: state.shiftMinutes, overdue: false, status: 'open' });
+  state.followups++;
+  $('fu-new-name').value = ''; $('fu-new-reason').value = '';
+  renderFollowupsView();
+  renderStateBoard();
+});
+
+/* ============================================================
+   DRUG INFO LOOKUP (OpenFDA) — shared by the Interactions view and
+   the hover-tooltip engine below, so both pull from one cache instead
+   of issuing duplicate network requests for the same drug.
+   @author Anam
+============================================================ */
+
+/** DEA schedule for the eight drugs this app knows about locally. OpenFDA label data does not reliably expose DEA schedule, so the badge always comes from local knowledge, not the API — see docs/DOMAIN.md. */
+const DRUG_SCHEDULES = { oxy:'CII', hydro:'CII', add:'CII', xan:'CIV' };
+
+/** drugName/brandName/genericName -> internal drug key, used to resolve a free-typed or streamed-text drug name back to local PHARMACY_STATE data (schedule, current stock) when OpenFDA has nothing or is unreachable. */
+function drugKeyFromName(name){
+  const n = name.trim().toLowerCase();
+  const found = Object.keys(drugNames).find(k => drugNames[k].toLowerCase().includes(n) || n.includes(drugNames[k].toLowerCase().split(' ')[0]));
+  return found || null;
+}
+
+/** Module-level cache so the same drug is never fetched twice in a session — keyed by lowercased drug name. */
+const drugInfoCache = new Map();
+
+/**
+ * Fetches drug information from the OpenFDA drug label endpoint.
+ * Results are cached in `drugInfoCache` to prevent redundant network
+ * requests for the same drug within a session.
+ *
+ * OpenFDA's label data has no structured "drug class" or "dosage"
+ * field that always exists — different manufacturers' labels populate
+ * different sections. Every field on the returned object is therefore
+ * optional; callers (the tooltip card, the Interactions checker) must
+ * render "—" or omit a section rather than assume a field is present.
+ *
+ * @param {string} drugName - Common, brand, or generic name of the drug.
+ * @returns {Promise<object>} Structured drug info: { name, brandName, genericName, pharmClass, route, boxedWarning, warningsText, drugInteractionsText, dosageText, schedule, notFound, offline, error }.
+ */
+async function fetchDrugInfo(drugName){
+  const cacheKey = drugName.trim().toLowerCase();
+  if(drugInfoCache.has(cacheKey)){
+    console.log('[Remi] Drug info cache hit:', cacheKey);
+    return drugInfoCache.get(cacheKey);
+  }
+
+  const localKey = drugKeyFromName(drugName);
+  const schedule = localKey ? DRUG_SCHEDULES[localKey] || null : null;
+
+  if(!navigator.onLine){
+    console.log('[Remi] Offline — skipping OpenFDA fetch for', cacheKey);
+    return { name: drugName, schedule, offline: true, notFound: false };
+  }
+
+  console.log('[Remi] Fetching OpenFDA drug info for:', cacheKey);
+  try{
+    const query = `(openfda.brand_name:"${drugName}" OR openfda.generic_name:"${drugName}")`;
+    const url = `https://api.fda.gov/drug/label.json?search=${encodeURIComponent(query)}&limit=1`;
+    const resp = await fetch(url);
+    if(!resp.ok){
+      console.log('[Remi] OpenFDA returned no match for', cacheKey, '(status', resp.status, ')');
+      const info = { name: drugName, schedule, notFound: true };
+      drugInfoCache.set(cacheKey, info);
+      return info;
+    }
+    const data = await resp.json();
+    const result = data.results && data.results[0];
+    if(!result){
+      const info = { name: drugName, schedule, notFound: true };
+      drugInfoCache.set(cacheKey, info);
+      return info;
+    }
+    const openfda = result.openfda || {};
+    const info = {
+      name: drugName,
+      brandName: (openfda.brand_name || [])[0] || drugName,
+      genericName: (openfda.generic_name || [])[0] || null,
+      pharmClass: (openfda.pharm_class_epc || openfda.pharm_class_cs || [])[0] || null,
+      route: (openfda.route || [])[0] || null,
+      boxedWarning: (result.boxed_warning || [])[0] || null,
+      warningsText: (result.warnings || result.warnings_and_cautions || [])[0] || null,
+      drugInteractionsText: (result.drug_interactions || [])[0] || null,
+      dosageText: (result.dosage_and_administration || [])[0] || null,
+      schedule,
+      notFound: false
+    };
+    console.log('[Remi] OpenFDA drug info resolved for', cacheKey, ':', info);
+    drugInfoCache.set(cacheKey, info);
+    return info;
+  } catch(err){
+    console.log('[Remi] OpenFDA fetch failed for', cacheKey, ':', err.message);
+    return { name: drugName, schedule, error: err.message };
+  }
+}
+
+/**
+ * Trims FDA label free text down to a sentence or two — OpenFDA label
+ * fields are often whole label sections (hundreds of words), and both
+ * the tooltip card and interaction view need a short excerpt rather
+ * than a wall of regulatory prose.
+ * @param {string} text - Raw label text.
+ * @param {number} [maxLen=220] - Soft character cap.
+ * @returns {string} Truncated, sentence-aware excerpt.
+ */
+function excerpt(text, maxLen = 220){
+  if(!text) return '';
+  const clean = text.replace(/\s+/g, ' ').trim();
+  if(clean.length <= maxLen) return clean;
+  const cut = clean.slice(0, maxLen);
+  const lastPeriod = cut.lastIndexOf('. ');
+  return (lastPeriod > 60 ? cut.slice(0, lastPeriod + 1) : cut) + '…';
+}
+
+/* ============================================================
+   VIEW: INTERACTIONS
+   A dedicated drug-drug interaction checker — distinct from the
+   hover tooltips below, which show single-drug label info. This
+   view answers "is it safe for this patient to be on BOTH of these."
+
+   Important honesty note: OpenFDA does not expose a structured
+   drug-drug interaction matrix (there is no clean "interactions
+   between A and B" endpoint). What's real here: each drug's own FDA
+   label `drug_interactions` text (free-text, drug-specific, often
+   says nothing about the OTHER drug at all) is pulled in as grounding
+   context, and the actual severity/mechanism/management synthesis is
+   Claude's clinical-knowledge reasoning, not a database lookup. The
+   disclaimer in the rendered output reflects that honestly.
+============================================================ */
+
+let interactionDrugs = []; // chip list of free-typed drug names, session-local (not part of `state` — this is a standalone checker, not shift data)
+
+/** Re-renders the interaction chip list and wires each chip's remove button. */
+function renderInteractionChips(){
+  const el = $('interaction-chip-list');
+  el.innerHTML = interactionDrugs.map((d, i) => `<span class="pill warn" style="cursor:pointer;" data-idx="${i}" title="Remove">${escapeHtml(d)} ✕</span>`).join('');
+  el.querySelectorAll('[data-idx]').forEach(chip => {
+    chip.addEventListener('click', () => {
+      interactionDrugs.splice(parseInt(chip.dataset.idx, 10), 1);
+      renderInteractionChips();
+    });
+  });
+}
+
+$('interaction-drug-input').addEventListener('keydown', e => {
+  if(e.key !== 'Enter') return;
+  const v = $('interaction-drug-input').value.trim();
+  if(v && !interactionDrugs.includes(v)){
+    interactionDrugs.push(v);
+    renderInteractionChips();
+  }
+  $('interaction-drug-input').value = '';
+});
+
+/**
+ * Adds a drug to the interaction-checker chip list from outside the
+ * Interactions view itself — this is the cross-mode link the spec
+ * calls for ("Patient Mode interaction checks surface after each
+ * pickup"). Called from checkCrossModeAndProceed() with the drug the
+ * patient just picked up, so a tech who switches to the Interactions
+ * view after a pickup finds it pre-seeded rather than starting blank.
+ * @param {string} drugLabel - Human-readable drug name, e.g. "Oxycodone 5mg".
+ */
+function seedInteractionCheck(drugLabel){
+  if(!interactionDrugs.includes(drugLabel)){
+    interactionDrugs.push(drugLabel);
+    renderInteractionChips();
+  }
+}
+
+/**
+ * Renders the severity matrix from Claude's parsed JSON response.
+ * @param {Array<{a:string,b:string,severity:string,mechanism:string,significance:string,management:string}>} pairs
+ */
+function renderInteractionMatrix(pairs){
+  const el = $('interaction-results');
+  if(!pairs || !pairs.length){
+    el.innerHTML = `<div style="color:var(--tx3); font-size:12px;">No interaction pairs returned.</div>`;
+    return;
+  }
+  el.innerHTML = `
+    <div style="font-size:11px; color:var(--tx3); margin-bottom:12px; line-height:1.5;">
+      Severity assessment is Claude's clinical-knowledge reasoning, grounded where available by each drug's FDA label text — not a structured interaction database lookup. Always confirm with the pharmacist before acting on a Contraindicated or Major result.
+    </div>
+    ${pairs.map(p => `
+      <div class="interaction-card">
+        <div class="interaction-pair">${escapeHtml(p.a)} <span style="color:var(--tx3);">×</span> ${escapeHtml(p.b)}</div>
+        <div style="margin-bottom:8px;"><span class="severity-pill ${(p.severity||'none').toLowerCase()}">${escapeHtml(p.severity || 'Unknown')}</span></div>
+        <div class="interaction-detail"><b>Mechanism:</b> ${escapeHtml(p.mechanism || '—')}</div>
+        <div class="interaction-detail"><b>Clinical significance:</b> ${escapeHtml(p.significance || '—')}</div>
+        <div class="interaction-detail"><b>Management:</b> ${escapeHtml(p.management || '—')}</div>
+      </div>
+    `).join('')}
+  `;
+}
+
+/**
+ * Runs the interaction check: pulls best-effort OpenFDA label context
+ * for each drug, then asks Claude to synthesize a severity matrix
+ * across every unique pair as strict JSON (no tools, no streaming —
+ * this is a single structured-output request, not a multi-turn
+ * investigation, so the simpler non-agentic call pattern from
+ * askRemi() fits better than runAgentTurn()'s tool loop).
+ */
+async function checkInteractions(){
+  const apiKey = getApiKey();
+  const resultsEl = $('interaction-results');
+  if(interactionDrugs.length < 2){
+    resultsEl.innerHTML = `<div style="color:var(--tx3); font-size:12px;">Add at least two drugs to check for interactions.</div>`;
+    return;
+  }
+  if(!apiKey){ openKeyModal(); return; }
+
+  console.log('[Remi] Checking interactions for:', interactionDrugs);
+  resultsEl.innerHTML = `<div style="color:var(--tx2); font-size:12px;">Checking interactions for ${interactionDrugs.length} drugs…</div>`;
+
+  const fdaContext = await Promise.all(interactionDrugs.map(d => fetchDrugInfo(d)));
+  console.log('[Remi] OpenFDA grounding context:', fdaContext);
+
+  const contextBlock = interactionDrugs.map((d, i) => {
+    const info = fdaContext[i];
+    const labelText = info && info.drugInteractionsText ? excerpt(info.drugInteractionsText, 300) : 'No drug_interactions text on file in OpenFDA for this drug.';
+    return `- ${d}: ${labelText}`;
+  }).join('\n');
+
+  const prompt = `Assess pairwise drug interactions for these drugs: ${interactionDrugs.join(', ')}.
+
+FDA label drug_interactions text on file for each (may be empty or unrelated to the other drugs listed — use your own clinical knowledge as the primary source, this is supplementary context only):
+${contextBlock}
+
+Respond with ONLY valid JSON, no markdown fences, no prose outside the JSON, in exactly this shape:
+{"pairs":[{"a":"drug name","b":"drug name","severity":"Contraindicated|Major|Moderate|Minor|None","mechanism":"one sentence","significance":"one sentence","management":"one sentence recommendation"}]}
+Include every unique pair from the drug list. If a pair has no known interaction, still include it with severity "None".`;
+
+  try{
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1500,
+        system: 'You are a clinical pharmacology reference assisting a pharmacy technician. This is decision support only, never a substitute for pharmacist judgment. Respond with strictly valid JSON and nothing else.',
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+    const data = await resp.json();
+    console.log('[Remi] Interaction check raw response:', data);
+    if(!resp.ok){
+      if(data?.error?.type === 'authentication_error') openKeyModal();
+      throw new Error(data?.error?.message || `HTTP ${resp.status}`);
+    }
+    const raw = data.content?.[0]?.text || '{}';
+    const jsonText = raw.replace(/^```json\s*|^```\s*|```\s*$/g, '').trim();
+    const parsed = JSON.parse(jsonText);
+    renderInteractionMatrix(parsed.pairs);
+  } catch(err){
+    console.log('[Remi] Interaction check failed:', err.message);
+    resultsEl.innerHTML = `<div style="color:var(--red); font-size:12px;">Could not complete interaction check: ${escapeHtml(err.message)}</div>`;
+  }
+}
+$('interaction-check-btn').addEventListener('click', checkInteractions);
+
+/* ============================================================
+   INIT
+============================================================ */
+renderStateBoard();
+updateClock();
+</script>
+</body>
+</html>
