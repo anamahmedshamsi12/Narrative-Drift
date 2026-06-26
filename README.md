@@ -749,5 +749,3 @@ Where two tool calls are independent — for example, `decode_reject` and `check
 
 **Anam Shamsi**
 
-- Portfolio: [anam-portfolio-seven.vercel.app](https://anam-portfolio-seven.vercel.app)
-- GitHub: [github.com/anamahmedshamsi12](https://github.com/anamahmedshamsi12)
